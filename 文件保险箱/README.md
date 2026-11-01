@@ -51,7 +51,7 @@ python3 -m venv .venv
 
 # 2. 跑测试（看全部通过；本机跳过 3 项 Windows 专用检查）
 .venv/bin/python -m pytest tests -q
-.venv/bin/python scripts/gui_selftest.py     # 图形界面 17 项自检
+.venv/bin/python scripts/gui_selftest.py     # 图形界面 18 项自检
 
 # 3. 命令行版：拿一个测试文件夹试真实流程
 mkdir -p /tmp/测试保险箱 && echo "机密内容" > /tmp/测试保险箱/患者名单.txt
@@ -125,8 +125,9 @@ mkdir -p /tmp/测试保险箱 && echo "机密内容" > /tmp/测试保险箱/患�
    - 打包完成后脚本会自动运行 `文件保险箱 --acceptance`（默认 KDF/分块的真实参数验收）
      和 `--selftest`（组件自检），不通过就构建失败
 
-2. **GitHub Actions 自动打**：`.github/workflows/build.yml` 已配置 macOS/Windows 双平台矩阵，
-   推送到 GitHub 后每个平台自动跑 136 个测试 + 18 项 GUI 自检 + 打包，产物在 Actions 的 Artifacts 里。
+2. **GitHub Actions 自动打**：本仓库的 `.github/workflows/build.yml`（单独推本目录时用），
+   或组内私有仓库 `group-use` 的 `.github/workflows/build-vault.yml`（同时管两个子项目），
+   每个平台自动跑 136 个测试 + 18 项 GUI 自检 + 打包，产物在 Actions 的 Artifacts / Releases 里。
 
 安装说明（发给组里同事看）：
 
@@ -172,7 +173,7 @@ mkdir -p /tmp/测试保险箱 && echo "机密内容" > /tmp/测试保险箱/患�
 
 - **M1**：加密核心 + 命令行 + 断电/崩溃测试（Mac 上跑通）✅
 - **M2**：Mac GUI + 托盘 + 自动上锁 + 恢复向导 + 审计界面 ✅
-- **M3**：打包 + GitHub Actions 自动构建 + 真机联调（macOS zip/dmg/源码包已出，Windows 待真机）🚧
+- **M3**：打包 + GitHub Actions 自动构建 + 真机联调（macOS zip/dmg/源码包已出；Windows CI 已全绿、安装包已出，真机联调待做）🚧
 - **M4**：入口（拖拽/`open -a`/右键快速操作）+ 使用文档 + 验收清单；真实（脱敏）数据试点待用户 🚧
 
 ## 已经知道、也接受的限制（写清楚，不装）
