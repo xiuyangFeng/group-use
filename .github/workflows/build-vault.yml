@@ -50,6 +50,7 @@ jobs:
           python -c "import os; os._exit(0)"; "bare=$LASTEXITCODE"
           python -c "import os;os.environ['QT_QPA_PLATFORM']='offscreen';from PySide6.QtWidgets import QApplication,QMainWindow;a=QApplication([]);w=QMainWindow();w.show();a.processEvents();w.close();a.processEvents();os._exit(0)"; "offscreen=$LASTEXITCODE"
           python -c "import os;os.environ['QT_QPA_PLATFORM']='windows';from PySide6.QtWidgets import QApplication,QMainWindow;a=QApplication([]);w=QMainWindow();w.show();a.processEvents();w.close();a.processEvents();os._exit(0)"; "windows=$LASTEXITCODE"
+          python -c "import os;os.environ['QT_QPA_PLATFORM']='offscreen';from PySide6.QtWidgets import QApplication,QMainWindow;a=QApplication([]);w=QMainWindow();w.show();a.processEvents();w.close();a.processEvents();from core.console import hard_exit;hard_exit(0)"; "hard_exit=$LASTEXITCODE"
           $env:QT_QPA_PLATFORM='windows'; python scripts/gui_selftest.py; "selftest_windows=$LASTEXITCODE"
           $env:QT_QPA_PLATFORM='windows'; python run_gui.py --selftest --report selftest-win.txt; "app_selftest_windows=$LASTEXITCODE"
 

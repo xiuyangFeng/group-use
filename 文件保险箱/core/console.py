@@ -34,8 +34,11 @@ def hard_exit(code: int = 0) -> None:
         try:
             import ctypes
 
-            k32 = ctypes.windll.kernel32
-            k32.TerminateProcess(k32.GetCurrentProcess(), ctypes.c_uint(code))
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.GetCurrentProcess.restype = ctypes.c_void_p
+            k32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            k32.TerminateProcess.restype = ctypes.c_int
+            k32.TerminateProcess(k32.GetCurrentProcess(), code)
         except Exception:  # noqa: BLE001
             pass
     os._exit(code)
