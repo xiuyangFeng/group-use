@@ -36,5 +36,5 @@ mkdir -p "$STAGE"
 cp -R "$APP" "$STAGE/"
 cp 使用说明.txt "$STAGE/"
 rm -f "release/CT_Deid_Mac_$NAME.zip"
-ditto -c -k --keepParent "$STAGE" "release/CT_Deid_Mac_$NAME.zip"   # ditto 保留签名和符号链接
+ditto -c -k --norsrc --keepParent "$STAGE" "release/CT_Deid_Mac_$NAME.zip"   # ditto 保留签名和符号链接
 echo "完成：release/CT_Deid_Mac_$NAME.zip"
