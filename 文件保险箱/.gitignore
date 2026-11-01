@@ -1,0 +1,17 @@
+# 本地虚拟环境与构建产物
+.venv/
+.venv-*/
+.tmp-tests/
+.smoke/
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+.build/
+assets/
+*.spec
+# 保险箱测试数据
+*.vault/
+.stress/
+.bench/

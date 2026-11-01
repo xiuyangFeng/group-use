@@ -1,0 +1,55 @@
+{
+  "ok": true,
+  "finished_at": "2026-11-01 15:06:29",
+  "steps": [
+    {
+      "step": "建库并确认状态",
+      "ok": true,
+      "seconds": 0.04,
+      "detail": "5 个文件"
+    },
+    {
+      "step": "连续 2 次解锁/上锁，字节一致",
+      "ok": true,
+      "seconds": 0.2,
+      "detail": "2 轮"
+    },
+    {
+      "step": "解锁后改文件/加文件/删文件",
+      "ok": true,
+      "seconds": 0.2,
+      "detail": "3 处变更"
+    },
+    {
+      "step": "恢复密钥重设密码，旧密码失效",
+      "ok": true,
+      "seconds": 0.11,
+      "detail": "旧密码已失效"
+    },
+    {
+      "step": "文件被占用时上锁中止",
+      "ok": true,
+      "seconds": 0.84,
+      "detail": "中止后重试成功"
+    },
+    {
+      "step": "审计链校验 + CSV 导出",
+      "ok": true,
+      "seconds": 0.0,
+      "detail": "15 条记录"
+    },
+    {
+      "step": "密文目录无明文残留",
+      "ok": true,
+      "seconds": 0.0,
+      "detail": "0 命中"
+    },
+    {
+      "step": "最终解锁校验并保持上锁",
+      "ok": true,
+      "seconds": 0.11,
+      "detail": "7 个条目"
+    }
+  ],
+  "seconds": 1.5
+}

@@ -1,0 +1,56 @@
+name: build-deid-windows
+
+# 脱敏工具：Windows exe 云端构建（PyInstaller 不能在 Mac 上打 Windows 包）
+on:
+  push:
+    branches: [main]
+    paths:
+      - "脱敏小软件/**"
+      - ".github/workflows/build-deid-windows.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: 脱敏小软件
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: 脱敏小软件/requirements.txt
+      - run: pip install -r requirements.txt pyinstaller pytest numpy
+      - run: python -m pytest -q tests
+      - run: pyinstaller --noconfirm --clean --onefile --windowed --name CT_Deid app.py
+
+      # 用打包好的 exe（而不是源码）跑一遍完整脱敏，确认多进程、写映射表在打包后都正常
+      - name: Smoke test exe
+        shell: pwsh
+        env:
+          DEID_HOME: "${{ runner.temp }}\\deid_home"
+          PYTHONIOENCODING: utf-8
+        run: |
+          python tools/make_fake_data.py smoke/input
+          $p = Start-Process dist/CT_Deid.exe -Wait -PassThru -ArgumentList `
+            '--input','smoke/input','--output','smoke/out','--mapping','smoke/local/map.xlsx','--yes','--workers','2'
+          if ($p.ExitCode -ne 0) { throw "exe exit code $($p.ExitCode)" }
+          $n = (Get-ChildItem smoke/out -Recurse -Filter *.dcm).Count
+          if ($n -lt 10) { throw "only $n dcm files written" }
+          if (-not (Test-Path smoke/local/map.xlsx)) { throw "mapping not written" }
+          "OK: $n files"
+
+      # 用 Python 的 zipfile 打包：中文文件名会带 UTF-8 标记，解压后不乱码（Compress-Archive 不带）
+      - name: Package
+        run: python tools/pack_windows.py dist/CT_Deid.exe release/CT_Deid_Windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CT_Deid_Windows
+          path: 脱敏小软件/release/CT_Deid_Windows.zip
+          if-no-files-found: error
+          retention-days: 30

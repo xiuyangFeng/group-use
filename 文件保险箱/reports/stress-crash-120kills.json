@@ -1,0 +1,11 @@
+{
+  "rounds": 60,
+  "kills": 120,
+  "skipped_no_hit": 0,
+  "nested_kills": 12,
+  "mismatches": [],
+  "residue": [],
+  "final_ok": true,
+  "elapsed_sec": 27.1,
+  "cli_invocations": 393
+}

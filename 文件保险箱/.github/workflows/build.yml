@@ -1,0 +1,68 @@
+name: build
+
+# 触发方式：推送到 main / 打 tag / 手动跑
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            arch: arm64
+            artifact: macOS-arm64
+          - os: windows-latest
+            arch: x64
+            artifact: Windows-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt pyinstaller
+
+      - name: 自动化测试（核心 + CLI）
+        run: python -m pytest tests -q
+        env:
+          FDVAULT_KDF_FAST: "1"
+
+      - name: 图形界面离屏自检（18 项）
+        run: python scripts/gui_selftest.py
+        env:
+          QT_QPA_PLATFORM: offscreen
+          FDVAULT_KDF_FAST: "1"
+
+      - name: 退出自动上锁检查（验收第 11 条）
+        run: python scripts/gui_exit_lock.py
+        env:
+          QT_QPA_PLATFORM: offscreen
+          FDVAULT_KDF_FAST: "1"
+
+      - name: 打包 + 冒烟 + 压缩 + 校验和
+        run: python scripts/build_app.py
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: 文件保险箱-${{ matrix.artifact }}
+          path: |
+            dist/*.zip
+            dist/*.dmg
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30

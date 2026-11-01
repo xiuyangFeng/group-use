@@ -1,0 +1,14 @@
+{
+  "files": 10000,
+  "file_size": 1000000,
+  "total_bytes": 10000000000,
+  "create_sec": 43.68,
+  "unlock_sec": 44.34,
+  "lock_sec": 53.25,
+  "verify_sec": 22.38,
+  "lock_bytes_per_sec": 187793427,
+  "unlock_bytes_per_sec": 225529995,
+  "verify_ok": true,
+  "target_5min": true,
+  "extrapolated_10k_10gb_sec": 53.2
+}
