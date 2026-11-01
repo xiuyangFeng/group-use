@@ -468,7 +468,6 @@ def main() -> int:
         _say(f"GUI SELFTEST FAIL：{PASSED} 通过，{len(FAILED)} 失败 -> {FAILED}")
         os._exit(1)
     _say(f"GUI SELFTEST PASS：{PASSED} 项全部通过")
-    sys.stdout.flush()
     os._exit(0)
 
 
