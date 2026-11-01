@@ -392,8 +392,17 @@ def main() -> int:
         second = SingleInstance(name)
         triggered: list = []
         assert first.start_server(lambda: triggered.append(1))
-        assert second.activate_existing()
-        deadline = time.time() + 5
+
+        # 在子线程里发起连接：Windows 的命名管道在同一线程里“连接 + 等服务端事件”
+        # 容易互相等待，用线程更接近真实客户端/服务端两个进程的场景。
+        import threading
+
+        def _poke() -> None:
+            time.sleep(0.1)
+            second.activate_existing()
+
+        threading.Thread(target=_poke, daemon=True).start()
+        deadline = time.time() + 8
         while not triggered and time.time() < deadline:
             pump(0.02)
         assert triggered == [1], triggered

@@ -54,6 +54,8 @@ jobs:
           python run_gui.py --selftest --report selftest-diag.txt
           "run_gui exit=$LASTEXITCODE"
           if (Test-Path selftest-diag.txt) { Get-Content selftest-diag.txt }
+          python scripts/gui_two_instance.py
+          "two-instance exit=$LASTEXITCODE"
 
       - name: 自动化测试（核心 + CLI）
         run: python -m pytest tests -q

@@ -13,7 +13,10 @@ PROJECT = Path(__file__).resolve().parent.parent
 
 def test_diagnostics_zip(tmp_path):
     home = tmp_path / "home"
-    data = home / "Library" / "Application Support" / "文件保险箱"
+    if os.name == "nt":
+        data = home / "文件保险箱"
+    else:
+        data = home / "Library" / "Application Support" / "文件保险箱"
     data.mkdir(parents=True)
     (data / "config.json").write_text('{"auto_lock_minutes": 15}', encoding="utf-8")
     (data / "gui.log").write_text("line1\nline2\n最后一行错误\n", encoding="utf-8")
@@ -24,6 +27,7 @@ def test_diagnostics_zip(tmp_path):
     env.update(
         {
             "HOME": str(home),
+            "APPDATA": str(home) if os.name == "nt" else str(home / "AppData"),
             "QT_QPA_PLATFORM": "offscreen",
             "FDVAULT_NO_OPEN": "1",
             "PYTHONPATH": str(PROJECT),

@@ -70,7 +70,7 @@ def _digest(root: Path) -> dict:
 
     out = {}
     for p in sorted(root.rglob("*")):
-        rel = str(p.relative_to(root))
+        rel = p.relative_to(root).as_posix()
         if rel == C.VAULT_DIRNAME or rel.startswith(C.VAULT_DIRNAME + "/") or rel == C.MARKER_NAME:
             continue
         if p.is_dir():
