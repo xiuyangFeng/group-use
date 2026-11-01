@@ -44,6 +44,16 @@ FAILED: list[str] = []
 PASSED = 0
 
 
+def _hard_exit(code: int) -> None:
+    try:
+        app.closeAllWindows()
+        app.processEvents()
+        app.quit()
+    except Exception:  # noqa: BLE001
+        pass
+    os._exit(code)
+
+
 def _say(text: str = "") -> None:
     """直接写 fd 1，绕开 Windows/Qt 退出时 flush TextIOWrapper 的 access violation。"""
     try:
@@ -466,9 +476,9 @@ def main() -> int:
     _say("")
     if FAILED:
         _say(f"GUI SELFTEST FAIL：{PASSED} 通过，{len(FAILED)} 失败 -> {FAILED}")
-        os._exit(1)
+        _hard_exit(1)
     _say(f"GUI SELFTEST PASS：{PASSED} 项全部通过")
-    os._exit(0)
+    _hard_exit(0)
 
 
 if __name__ == "__main__":

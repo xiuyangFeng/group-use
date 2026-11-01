@@ -74,6 +74,24 @@ def option_value(args: list[str], name: str) -> str | None:
     return None
 
 
+def _headless_exit(code: int) -> None:
+    """无界面模式直接退出，跳过 Qt/Python 清理。
+
+    Windows + offscreen 下创建过 QWidget 后正常 return，进程退出时偶尔会在
+    Qt DLL detach 阶段报 access violation（退出码 3221225477），把已经通过的
+    验收变成“失败”。这里先尽量温和地关窗口，再硬退出。
+    """
+    app = QApplication.instance()
+    if app is not None:
+        try:
+            app.closeAllWindows()
+            app.processEvents()
+            app.quit()
+        except Exception:  # noqa: BLE001
+            pass
+    os._exit(code)
+
+
 def setup_logging(store: AppStore) -> None:
     try:
         app_data_dir().mkdir(parents=True, exist_ok=True)
@@ -107,19 +125,19 @@ def main(argv: list[str] | None = None) -> int:
     if "--diagnostics" in args:
         from .diagnostics import run as run_diagnostics
 
-        return run_diagnostics(option_value(args, "--out"))
+        _headless_exit(run_diagnostics(option_value(args, "--out")))
 
     # 真实参数验收：默认 KDF + 默认分块，端到端跑加密流程（安装包验收用）
     if "--acceptance" in args:
         from .acceptance_check import run as run_acceptance
 
-        return run_acceptance(report)
+        _headless_exit(run_acceptance(report))
 
     # 打包自检：不打开界面，验证核心 + 界面组件都能用（安装包的健康检查）
     if "--selftest" in args:
         from .selfcheck import run as run_selfcheck
 
-        return run_selfcheck(report)
+        _headless_exit(run_selfcheck(report))
 
     app = QApplication(args)
     app.setApplicationName("文件保险箱")
