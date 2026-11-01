@@ -1,0 +1,33 @@
+name: build-windows
+on: [workflow_dispatch, push]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements.txt pyinstaller pytest numpy
+      - run: python -m pytest -q tests
+      - run: pyinstaller --noconfirm --clean --onefile --windowed --name CT_Deid app.py
+      # 用打包好的 exe（而不是源码）跑一遍完整脱敏，确认多进程、写映射表在打包后都正常
+      - name: Smoke test exe
+        shell: pwsh
+        env: { DEID_HOME: "${{ runner.temp }}\\deid_home" }
+        run: |
+          python tools/make_fake_data.py smoke/input
+          $p = Start-Process dist/CT_Deid.exe -Wait -PassThru -ArgumentList `
+            '--input','smoke/input','--output','smoke/out','--mapping','smoke/local/map.xlsx','--yes','--workers','2'
+          if ($p.ExitCode -ne 0) { throw "exe exit code $($p.ExitCode)" }
+          $n = (Get-ChildItem smoke/out -Recurse -Filter *.dcm).Count
+          if ($n -lt 10) { throw "only $n dcm files written" }
+          if (-not (Test-Path smoke/local/map.xlsx)) { throw "mapping not written" }
+          "OK: $n files"
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory release/CT_Deid_Windows | Out-Null
+          Copy-Item dist/CT_Deid.exe, 使用说明.txt release/CT_Deid_Windows/
+          Compress-Archive release/CT_Deid_Windows release/CT_Deid_Windows.zip
+      - uses: actions/upload-artifact@v4
+        with: { name: CT_Deid_Windows, path: release/CT_Deid_Windows.zip }
