@@ -47,7 +47,7 @@ def _say(text: str) -> None:
 
 def main() -> int:
     setup_utf8_stdio()
-    QTimer.singleShot(30000, lambda: (print("EXITLOCK TIMEOUT", flush=True), os._exit(3)))
+    QTimer.singleShot(30000, lambda: (print("EXITLOCK TIMEOUT", flush=True), hard_exit(3)))
     tmp = Path(tempfile.mkdtemp(prefix="fdvault-exitlock-"))
     root = tmp / "数据"
     make_tree(root)

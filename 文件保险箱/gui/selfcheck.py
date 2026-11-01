@@ -14,6 +14,8 @@ import tempfile
 import traceback
 from pathlib import Path
 
+from core.console import hard_exit
+
 PASSWORD = "selfcheck-password-1234"
 _ok = 0
 _failed: list[str] = []
@@ -181,9 +183,7 @@ def run(report_path: str | None = None) -> int:
         _say(f"SELFCHECK FAIL：{_ok} 通过，{len(_failed)} 失败 -> {_failed}")
         sys.stdout.flush() if sys.stdout else None
         sys.stderr.flush() if sys.stderr else None
-        os._exit(_finish(1))
+        hard_exit(_finish(1))
     _say(f"SELFCHECK PASS：{_ok} 项全部通过")
-    sys.stdout.flush() if sys.stdout else None
-    sys.stderr.flush() if sys.stderr else None
-    os._exit(_finish(0))
+    hard_exit(_finish(0))
     return 0  # pragma: no cover

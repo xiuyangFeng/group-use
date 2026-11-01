@@ -171,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
                 window.close()
             finally:
                 logging.shutdown()
-                os._exit(0)
+                hard_exit(0)
 
         QTimer.singleShot(int(auto_quit), _auto_quit)
 
