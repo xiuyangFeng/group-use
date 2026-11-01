@@ -4,11 +4,14 @@ name: build-vault
 on:
   push:
     branches: [main]
-    tags: ["v*"]
     paths:
       - "文件保险箱/**"
       - ".github/workflows/build-vault.yml"
   workflow_dispatch:
+
+concurrency:
+  group: build-vault-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:

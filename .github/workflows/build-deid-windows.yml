@@ -9,6 +9,10 @@ on:
       - ".github/workflows/build-deid-windows.yml"
   workflow_dispatch:
 
+concurrency:
+  group: build-deid-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-latest
