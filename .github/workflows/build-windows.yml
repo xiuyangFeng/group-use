@@ -23,11 +23,8 @@ jobs:
           if ($n -lt 10) { throw "only $n dcm files written" }
           if (-not (Test-Path smoke/local/map.xlsx)) { throw "mapping not written" }
           "OK: $n files"
+      # 用 Python 的 zipfile 打包：中文文件名会带 UTF-8 标记，解压后不乱码（Compress-Archive 不带）
       - name: Package
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory release/CT_Deid_Windows | Out-Null
-          Copy-Item dist/CT_Deid.exe, 使用说明.txt release/CT_Deid_Windows/
-          Compress-Archive release/CT_Deid_Windows release/CT_Deid_Windows.zip
+        run: python tools/pack_windows.py dist/CT_Deid.exe release/CT_Deid_Windows.zip
       - uses: actions/upload-artifact@v4
         with: { name: CT_Deid_Windows, path: release/CT_Deid_Windows.zip }
