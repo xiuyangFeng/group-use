@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+
+import pytest
+
 from core import fsutil
 
 
@@ -39,6 +43,7 @@ def test_unc_path_gets_unc_prefix(monkeypatch):
     assert got.endswith("患者数据\\a.txt") or "患者数据" in got
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows 上 /tmp 会解析成当前盘符下的路径，属正常")
 def test_posix_passthrough():
     p = "/tmp/" + "x" * 400
     assert fsutil.long_path(p) == p

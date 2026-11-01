@@ -58,6 +58,8 @@ def test_ci_test_count_documented_matches_reality():
         cwd=PROJECT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
     )
     m = re.search(r"(\d+) tests? collected", proc.stdout + proc.stderr)

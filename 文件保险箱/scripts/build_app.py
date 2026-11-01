@@ -176,7 +176,7 @@ def smoke_test(bundle: Path) -> None:
     acc_report = fake_home / "acceptance-report.txt"
     acc = subprocess.run(
         [str(binary), "--acceptance", "--report", str(acc_report)],
-        env=acc_env, cwd=str(fake_home), capture_output=True, text=True, timeout=300,
+        env=acc_env, cwd=str(fake_home), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
     )
     acc_text = acc.stdout
     if acc_report.exists():
@@ -191,7 +191,7 @@ def smoke_test(bundle: Path) -> None:
     sel_report = fake_home / "selftest-report.txt"
     proc = subprocess.run(
         [str(binary), "--selftest", "--report", str(sel_report)],
-        env=env, cwd=str(fake_home), capture_output=True, text=True, timeout=180,
+        env=env, cwd=str(fake_home), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
     )
     sel_text = proc.stdout
     if sel_report.exists():
@@ -203,7 +203,7 @@ def smoke_test(bundle: Path) -> None:
     log("自检通过：" + next(line for line in sel_text.splitlines() if "SELFCHECK PASS" in line))
 
     log(f"冒烟启动：{binary.name}（离屏，2.5 秒自动退出）")
-    proc = subprocess.run([str(binary)], env=env, cwd=str(fake_home), capture_output=True, text=True, timeout=120)
+    proc = subprocess.run([str(binary)], env=env, cwd=str(fake_home), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
     if proc.returncode != 0:
         raise SystemExit(f"打包程序启动失败（exit {proc.returncode}）\nSTDOUT:\n{proc.stdout[-3000:]}\nSTDERR:\n{proc.stderr[-3000:]}")
     log("冒烟通过：打包程序可正常启动并退出")
@@ -213,7 +213,7 @@ def smoke_test(bundle: Path) -> None:
     folder.mkdir(exist_ok=True)
     log("冒烟：带文件夹参数启动（右键菜单/拖拽入口）")
     proc = subprocess.run(
-        [str(binary), str(folder)], env=env, cwd=str(fake_home), capture_output=True, text=True, timeout=120
+        [str(binary), str(folder)], env=env, cwd=str(fake_home), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120
     )
     if proc.returncode != 0:
         raise SystemExit(
@@ -293,6 +293,8 @@ def verify_zip_artifact(zip_path: Path) -> None:
         cwd=str(work),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=300,
     )
     text = proc.stdout
@@ -314,6 +316,8 @@ def verify_zip_artifact(zip_path: Path) -> None:
         cwd=str(work),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
     )
     if proc.returncode != 0:
@@ -348,6 +352,8 @@ def make_dmg(bundle: Path) -> Path | None:
         ["hdiutil", "makehybrid", "-hfs", "-hfs-volume-name", APP_NAME, "-o", str(raw), str(stage)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if mk.returncode != 0 or not raw.exists():
         raise SystemExit(f"dmg 镜像生成失败：{mk.stdout[-2000:]}{mk.stderr[-2000:]}")
@@ -355,6 +361,8 @@ def make_dmg(bundle: Path) -> Path | None:
         ["hdiutil", "convert", str(raw), "-format", "UDZO", "-ov", "-o", str(dmg)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     raw.unlink(missing_ok=True)
     if conv.returncode != 0 or not dmg.exists():
@@ -371,6 +379,8 @@ def make_dmg(bundle: Path) -> Path | None:
         ["hdiutil", "attach", "-nobrowse", "-readonly", "-mountpoint", str(mnt), str(dmg)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if attach.returncode == 0:
         app_in_dmg = mnt / bundle.name
@@ -413,7 +423,7 @@ def make_dmg(bundle: Path) -> Path | None:
                 smoke_env["FDVAULT_AUTO_QUIT_MS"] = "2500"
                 proc2 = subprocess.run(
                     [str(binary), str(folder)], env=smoke_env, cwd=str(fake_home),
-                    capture_output=True, text=True, timeout=120,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
                 )
                 if proc2.returncode != 0:
                     fail = (

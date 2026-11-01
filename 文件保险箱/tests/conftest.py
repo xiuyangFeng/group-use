@@ -118,6 +118,8 @@ def run_cli(
         input=stdin,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=env,
         cwd=str(cwd or PROJECT),
         timeout=300,

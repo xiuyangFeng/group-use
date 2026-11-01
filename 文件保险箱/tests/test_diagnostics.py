@@ -33,6 +33,8 @@ def test_diagnostics_zip(tmp_path):
         [sys.executable, str(PROJECT / "run_gui.py"), "--diagnostics", "--out", str(out)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=180,
         env=env,
         cwd=str(PROJECT),

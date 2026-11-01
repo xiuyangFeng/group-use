@@ -33,6 +33,8 @@ def _run(root: Path, *extra: str):
         [sys.executable, str(PROJECT / "scripts" / "rename_product.py"), "--root", str(root), "--new", NEW, *extra],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
     )
 
@@ -70,6 +72,8 @@ def test_invalid_new_name_rejected(tmp_path):
         [sys.executable, str(PROJECT / "scripts" / "rename_product.py"), "--root", str(tmp_path), "--new", "a/b"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
     )
     assert proc.returncode != 0

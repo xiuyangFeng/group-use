@@ -21,6 +21,8 @@ def test_pilot_rehearsal(tmp_path):
         [sys.executable, str(PROJECT / "scripts" / "pilot_rehearsal.py"), "--report", str(report)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=300,
         env=env,
         cwd=str(PROJECT),

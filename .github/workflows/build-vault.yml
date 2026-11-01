@@ -42,6 +42,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt pyinstaller
 
+      - name: Windows 离屏自检诊断（临时）
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          FDVAULT_KDF_FAST: "1"
+        run: |
+          python -c "from PySide6.QtWidgets import QApplication; app=QApplication([]); print('QT OK', app.platformName())"
+          python run_gui.py --selftest --report selftest-diag.txt
+          "run_gui exit=$LASTEXITCODE"
+          if (Test-Path selftest-diag.txt) { Get-Content selftest-diag.txt }
+
       - name: 自动化测试（核心 + CLI）
         run: python -m pytest tests -q
         env:

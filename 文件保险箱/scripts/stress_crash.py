@@ -71,7 +71,7 @@ class Runner:
         cmd = [str(self.python), "-m", "cli.main", *args, "--audit-dir", str(self.audit_dir)]
         self.runs += 1
         return subprocess.run(
-            cmd, input=stdin, capture_output=True, text=True, env=env, cwd=str(PROJECT), timeout=600
+            cmd, input=stdin, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, cwd=str(PROJECT), timeout=600
         )
 
     def state(self) -> str:

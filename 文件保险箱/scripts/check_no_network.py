@@ -32,6 +32,8 @@ def _lsof_ip(pid: int) -> str:
         ["lsof", "-nP", "-i", "-a", "-p", str(pid)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=15,
     )
     # 第一行是表头；有数据行就说明有 IP 连接/监听
