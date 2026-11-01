@@ -44,17 +44,25 @@ FAILED: list[str] = []
 PASSED = 0
 
 
+def _say(text: str = "") -> None:
+    """直接写 fd 1，绕开 Windows/Qt 退出时 flush TextIOWrapper 的 access violation。"""
+    try:
+        os.write(1, (text + "\n").encode("utf-8", "replace"))
+    except OSError:
+        pass
+
+
 def check(name: str, fn) -> None:
     global PASSED
     try:
         fn()
     except Exception:  # noqa: BLE001
         FAILED.append(name)
-        print(f"  ✗ {name}")
+        _say(f"  ✗ {name}")
         traceback.print_exc()
     else:
         PASSED += 1
-        print(f"  ✓ {name}")
+        _say(f"  ✓ {name}")
 
 
 def pump(seconds: float = 0.0) -> None:
@@ -93,7 +101,7 @@ def main() -> int:
     cfg = tmp / "cfg"
     cfg.mkdir(parents=True)
 
-    print("== 基础 ==")
+    _say("== 基础 ==")
 
     def _store():
         s = AppStore(cfg / "store1")
@@ -121,7 +129,7 @@ def main() -> int:
 
     check("图标生成", _icons)
 
-    print("== 主窗口 ==")
+    _say("== 主窗口 ==")
     root = tmp / "患者数据"
     root.mkdir()
     make_vault(root, cfg)
@@ -204,7 +212,7 @@ def main() -> int:
 
     check("空闲 5 分钟触发自动上锁", _auto_lock)
 
-    print("== 窗口 / 弹窗 ==")
+    _say("== 窗口 / 弹窗 ==")
 
     def _password():
         dlg = PasswordDialog(None, str(tmp / "x"))
@@ -283,7 +291,7 @@ def main() -> int:
 
     check("审计窗口加载 + 哈希链校验", _audit)
 
-    print("== 向导端到端 ==")
+    _say("== 向导端到端 ==")
 
     def _wizard():
         s = AppStore(cfg / "store7")
@@ -324,7 +332,7 @@ def main() -> int:
 
     check("新建向导：选文件夹→密码→恢复密钥→首次上锁→数据完整", _wizard)
 
-    print("== 后台线程 ==")
+    _say("== 后台线程 ==")
 
     def _worker():
         target = tmp / "线程数据"
@@ -455,12 +463,11 @@ def main() -> int:
     check("上次没上锁的提醒（状态栏 + 卡片）", _leftover_warning)
 
 
-    print()
+    _say("")
     if FAILED:
-        print(f"GUI SELFTEST FAIL：{PASSED} 通过，{len(FAILED)} 失败 -> {FAILED}")
-        sys.stdout.flush()
+        _say(f"GUI SELFTEST FAIL：{PASSED} 通过，{len(FAILED)} 失败 -> {FAILED}")
         os._exit(1)
-    print(f"GUI SELFTEST PASS：{PASSED} 项全部通过")
+    _say(f"GUI SELFTEST PASS：{PASSED} 项全部通过")
     sys.stdout.flush()
     os._exit(0)
 

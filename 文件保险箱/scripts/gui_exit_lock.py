@@ -37,6 +37,14 @@ from tests.conftest import PASSWORD, make_tree  # noqa: E402
 app = QApplication([])
 
 
+def _say(text: str) -> None:
+    """直接写 fd 1，绕开 Windows/Qt 退出时 flush 的 access violation。"""
+    try:
+        os.write(1, (text + "\n").encode("utf-8", "replace"))
+    except OSError:
+        pass
+
+
 def main() -> int:
     setup_utf8_stdio()
     QTimer.singleShot(30000, lambda: (print("EXITLOCK TIMEOUT", flush=True), os._exit(3)))
@@ -67,14 +75,12 @@ def main() -> int:
         import traceback
 
         traceback.print_exc()
-        print("EXITLOCK FAIL", flush=True)
+        _say("EXITLOCK FAIL")
         return 1
-    print("EXITLOCK PASS：退出前自动上锁，明文已清空", flush=True)
+    _say("EXITLOCK PASS：退出前自动上锁，明文已清空")
     return 0
 
 
 if __name__ == "__main__":
     code = main()
-    sys.stdout.flush()
-    sys.stderr.flush()
     os._exit(code)
