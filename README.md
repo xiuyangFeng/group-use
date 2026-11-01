@@ -2,23 +2,31 @@
 
 把"每个子文件夹一个患者"的 CT DICOM 数据批量脱敏，输出可以发给外部做分割/标注的数据，并在本地留一份映射表。
 
-## 使用（Windows）
+## 使用（免安装，对方电脑不需要装 Python 或任何依赖）
 
-1. 双击 `CT_Deid.exe`
-2. 选择三个路径：
+发给别人的是 `release/` 里的压缩包，解压后双击即可，里面附有 `使用说明.txt`：
+
+| 压缩包 | 适用 | 打开方式 |
+|---|---|---|
+| `CT_Deid_Windows.zip` | Windows 10/11 | 双击 `CT_Deid.exe`（单个文件，自带运行环境） |
+| `CT_Deid_Mac_AppleSilicon.zip` | M1/M2/M3/M4… 芯片的 Mac | 双击 `CT_Deid.app` |
+| `CT_Deid_Mac_Intel.zip` | Intel 芯片的 Mac | 双击 `CT_Deid.app` |
+
+- Windows 首次打开若出现"Windows 已保护你的电脑"：更多信息 → 仍要运行
+- Mac 首次打开若提示无法验证开发者：系统设置 → 隐私与安全性 → 仍要打开；若提示"已损坏"：终端执行 `xattr -cr CT_Deid.app 的路径`
+- 程序没有购买代码签名证书，所以第一次会有上述提示，只需处理一次
+
+界面操作：
+
+1. 选择三个路径：
    - **原始数据文件夹**：里面每个子文件夹是一个患者（子文件夹内可以有多层目录）
    - **输出文件夹**：脱敏后的数据，发给别人的就是这个文件夹
    - **映射表**：`.xlsx`，记录 编号 ↔ 原患者。已存在就继续追加，同一患者（按患者 ID）沿用原编号
-3. 点 **开始脱敏** → 弹窗确认编号分配 → 等待完成 → 查看日志
+2. 点 **开始脱敏** → 弹窗确认编号分配 → 等待完成 → 查看日志
 
 > 映射表和日志里有患者信息，**只能留在本地**。软件会拒绝把它们放进输出文件夹或原始数据文件夹。
 
-## 使用（Mac）
-
-双击 `run_mac.command`。第一次运行会自动在本文件夹建一个 `.venv-run` 并安装依赖（需要联网，约 1 分钟），以后双击直接打开。
-- 如果提示"无法打开，因为来自身份不明的开发者"：右键 → 打开 → 打开（只需一次）
-- 需要先从 python.org 装 Python 3.12（系统自带的或 Anaconda 的 Python 也可以，只要带 tkinter）
-- 不要直接用系统的 `python3 app.py` 运行，那样会提示缺少依赖
+（开发者从源码运行：Windows 双击 `run_from_source.bat`，Mac 双击 `run_mac.command`，第一次会自动建环境装依赖，需要本机有 Python 3.12。）
 
 ### 数据安全承诺：软件没有任何删除功能
 
@@ -140,14 +148,20 @@ uv venv .venv -p 3.12 && uv pip install -p .venv/bin/python -r requirements.txt 
 .venv/bin/python app.py --probe test_data/input --report probe.txt
 ```
 
-## 打包 Windows exe
+## 打包免安装版
 
-PyInstaller 不能在 Mac 上打 Windows 包，二选一：
-- 在 Windows 上装 Python 3.12（安装时勾选 Add to PATH），把项目文件夹拷过去，双击 `build_windows.bat`，产物在 `dist\CT_Deid.exe`
-  - 拷贝时**不要带 `.venv` 文件夹**（Mac 专用，Windows 上不能用）；`test_data`、`__pycache__` 也不需要
-  - 不想打包也可以：双击 `run_from_source.bat` 直接运行（第一次会自动安装依赖）
-  - 打包需要联网下载依赖。可以在任意一台联网的 Windows 电脑上打包，之后只把 `CT_Deid.exe` 一个文件拷到实际处理数据的电脑上，那台电脑不需要装 Python
-- 把项目推到 GitHub，`.github/workflows/build-windows.yml` 会在云端的 Windows 环境里跑测试并打包，然后在 Actions 页面下载 exe
+产物都用 PyInstaller 把 Python 解释器、tkinter、pydicom、openpyxl 一起打进去，打包后会用假数据跑一遍完整脱敏（含多进程）做自检。
+
+- **Windows exe**：PyInstaller 不能在 Mac 上打 Windows 包。项目在 GitHub 私有仓库 `xiuyangFeng/CT_Deid`，每次 `git push` 后 `.github/workflows/build-windows.yml` 会在云端 Windows 上跑测试 → 打包 → 用 exe 自检 → 产出 `CT_Deid_Windows.zip`。下载：
+  ```bash
+  gh run download -R xiuyangFeng/CT_Deid -n CT_Deid_Windows -D release   # 最近一次成功的构建
+  ```
+  也可以在 Windows 电脑上装 Python 3.12 后双击 `build_windows.bat`，产物在 `dist\CT_Deid.exe`（拷贝项目时不要带 `.venv*` 文件夹）
+- **Mac app**（需要 [uv](https://docs.astral.sh/uv/)）：
+  ```bash
+  ./build_mac.sh          # Apple 芯片版 → release/CT_Deid_Mac_AppleSilicon.zip
+  ./build_mac.sh x86_64   # Intel 版（在 Apple 芯片 Mac 上通过 Rosetta 打）→ release/CT_Deid_Mac_Intel.zip
+  ```
 
 ## 代码结构
 
