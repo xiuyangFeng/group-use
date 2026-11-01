@@ -127,10 +127,9 @@ class SingleInstance:
             conn = self.server.nextPendingConnection()
             if conn is None:
                 continue
-            conn.readyRead.connect(lambda c=conn: self._read(c))
+            # 连接本身就代表“第二个实例来了”，立刻唤起；不要等 readyRead——
+            # Windows 命名管道下客户端可能已经写完后断开，readyRead 不会再触发。
+            conn.readyRead.connect(conn.readAll)
             conn.disconnected.connect(conn.deleteLater)
-
-    def _read(self, conn: QLocalSocket) -> None:
-        conn.readAll()
-        if self._on_activate is not None:
-            self._on_activate()
+            if self._on_activate is not None:
+                self._on_activate()
