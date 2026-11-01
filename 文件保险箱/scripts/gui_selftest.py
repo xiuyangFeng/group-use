@@ -30,7 +30,7 @@ sys.path.insert(0, str(PROJECT))
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from core.console import setup_utf8_stdio
+from core.console import hard_exit, setup_utf8_stdio
 from core import constants as C  # noqa: E402
 from core.audit import AuditLog  # noqa: E402
 from core.control import OperationControl  # noqa: E402
@@ -51,7 +51,7 @@ def _hard_exit(code: int) -> None:
         app.quit()
     except Exception:  # noqa: BLE001
         pass
-    os._exit(code)
+    hard_exit(code)
 
 
 def _say(text: str = "") -> None:

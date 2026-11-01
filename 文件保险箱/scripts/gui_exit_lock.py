@@ -27,7 +27,7 @@ sys.path.insert(0, str(PROJECT))
 from PySide6.QtCore import QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from core.console import setup_utf8_stdio
+from core.console import hard_exit, setup_utf8_stdio
 from core import constants as C  # noqa: E402
 from core.vault import Vault  # noqa: E402
 from gui.main_window import MainWindow  # noqa: E402
@@ -83,4 +83,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     code = main()
-    os._exit(code)
+    hard_exit(code)

@@ -11,7 +11,7 @@ from PySide6.QtCore import QEvent, QObject, QTimer
 from PySide6.QtGui import QFileOpenEvent
 from PySide6.QtWidgets import QApplication
 
-from core.console import setup_utf8_stdio
+from core.console import hard_exit, setup_utf8_stdio
 
 from .main_window import MainWindow
 from .store import AppStore, app_data_dir
@@ -89,7 +89,7 @@ def _headless_exit(code: int) -> None:
             app.quit()
         except Exception:  # noqa: BLE001
             pass
-    os._exit(code)
+    hard_exit(code)
 
 
 def setup_logging(store: AppStore) -> None:

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 
@@ -20,3 +21,21 @@ def setup_utf8_stdio() -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError, OSError):
             pass
+
+
+def hard_exit(code: int = 0) -> None:
+    """退出进程，Windows 上绕过 DLL detach。
+
+    在 Windows 上创建过 Qt 组件后调用 os._exit，进程退出时 Qt DLL 的 detach
+    偶尔会 access violation（退出码 3221225477），把已经通过的检查变成失败。
+    TerminateProcess 不执行 DllMain 的 PROCESS_DETACH，可稳定拿到想要的退出码。
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            k32 = ctypes.windll.kernel32
+            k32.TerminateProcess(k32.GetCurrentProcess(), ctypes.c_uint(code))
+        except Exception:  # noqa: BLE001
+            pass
+    os._exit(code)
