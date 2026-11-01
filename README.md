@@ -7,6 +7,21 @@
 | 文件保险箱 | [`文件保险箱/`](文件保险箱/README.md) | 把整个文件夹加密上锁，跨 macOS / Windows，组内共用一个密码，带恢复密钥、审计日志、自动上锁 |
 | CT 数据脱敏工具 | [`脱敏小软件/`](脱敏小软件/README.md) | 把“每个子文件夹一个患者”的 CT DICOM 批量脱敏，输出可外发的数据，本地留映射表 |
 
+## 下载安装包
+
+安装包在 [Releases v0.3.0](https://github.com/xiuyangFeng/group-use/releases/tag/v0.3.0)：
+
+| 文件 | 平台 |
+|---|---|
+| `fdvault-0.3.0-Windows-x64.zip` | Windows 10/11 x64（解压后双击 `文件保险箱/文件保险箱.exe`） |
+| `fdvault-0.3.0-macOS-arm64.dmg` | macOS Apple 芯片（拖进 Applications） |
+| `fdvault-0.3.0-macOS-arm64.zip` | macOS Apple 芯片（解压出 `.app`） |
+| `CT_Deid_Windows.zip` | Windows x64（CT 脱敏 v13） |
+| `fdvault-0.3.0-source.zip` | 源码包 |
+| `SHA256SUMS.txt` | 校验文件 |
+
+未签名，首次打开按提示放行（macOS：右键打开；Windows：更多信息 → 仍要运行）。文件名用 ASCII `fdvault`，避免中文文件名在部分浏览器里乱码。
+
 ## 文件保险箱
 
 - 使用说明：[文件保险箱/使用说明](文件保险箱/docs/使用说明.md)
@@ -18,7 +33,7 @@
 ## 脱敏工具
 
 - 使用说明：[脱敏小软件/README.md](脱敏小软件/README.md)
-- 原仓库 `xiuyangFeng/CT_Deid` 已迁移到这里（历史提交保留在 `脱敏小软件/` 的提交记录中）
+- 原仓库 `xiuyangFeng/CT_Deid` 已迁移到这里（历史提交保留在 `脱敏小软件/` 的提交记录中；旧仓库待删，见 [迁移说明](文件保险箱/docs/仓库迁移说明.md)）
 
 ## 云端构建（GitHub Actions）
 
