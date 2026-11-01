@@ -42,20 +42,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt pyinstaller
 
-      - name: Windows 离屏自检诊断（临时）
+      - name: Windows Qt 退出诊断（临时）
         if: runner.os == 'Windows'
         continue-on-error: true
         shell: pwsh
-        env:
-          QT_QPA_PLATFORM: offscreen
-          FDVAULT_KDF_FAST: "1"
         run: |
-          python -c "from PySide6.QtWidgets import QApplication; app=QApplication([]); print('QT OK', app.platformName())"
-          python run_gui.py --selftest --report selftest-diag.txt
-          "run_gui exit=$LASTEXITCODE"
-          if (Test-Path selftest-diag.txt) { Get-Content selftest-diag.txt }
-          python scripts/gui_two_instance.py
-          "two-instance exit=$LASTEXITCODE"
+          python -c "import os; os._exit(0)"; "bare=$LASTEXITCODE"
+          python -c "import os;os.environ['QT_QPA_PLATFORM']='offscreen';from PySide6.QtWidgets import QApplication,QMainWindow;a=QApplication([]);w=QMainWindow();w.show();a.processEvents();w.close();a.processEvents();os._exit(0)"; "offscreen=$LASTEXITCODE"
+          python -c "import os;os.environ['QT_QPA_PLATFORM']='windows';from PySide6.QtWidgets import QApplication,QMainWindow;a=QApplication([]);w=QMainWindow();w.show();a.processEvents();w.close();a.processEvents();os._exit(0)"; "windows=$LASTEXITCODE"
+          $env:QT_QPA_PLATFORM='windows'; python scripts/gui_selftest.py; "selftest_windows=$LASTEXITCODE"
+          $env:QT_QPA_PLATFORM='windows'; python run_gui.py --selftest --report selftest-win.txt; "app_selftest_windows=$LASTEXITCODE"
 
       - name: 自动化测试（核心 + CLI）
         run: python -m pytest tests -q
