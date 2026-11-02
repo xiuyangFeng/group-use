@@ -13,7 +13,7 @@
 | CPU/内存 | |
 | 系统账户名 | |
 | 安装包文件名 | |
-| 安装包 SHA256（`Get-FileHash .\文件保险箱-0.3.0-Windows-x64.zip -Algorithm SHA256`） | |
+| 安装包 SHA256（`Get-FileHash .\文件保险箱-0.3.1-Windows-x64.zip -Algorithm SHA256`） | |
 | 解压/安装目录 | |
 | 网络状态（应离线） | ☐ 已断网 ☐ 有网（也不该联网） |
 | 测试日期 | |
@@ -92,7 +92,7 @@ Get-Content (Join-Path $d "audit.jsonl") -Tail 10
 【能否复现】是/否，每次都能
 【是否丢数据】否
 【附件】截图 03-01.png、gui.log 最后 40 行
-【环境】Windows 11 23H2，文件保险箱 0.3.0，exe 在 D:\tools\文件保险箱
+【环境】Windows 11 23H2，文件保险箱 0.3.1，exe 在 D:\tools\文件保险箱
 ```
 
 ## 7. 结论与签字
@@ -105,4 +105,4 @@ Get-Content (Join-Path $d "audit.jsonl") -Tail 10
 | 遗留问题 | |
 | 测试人 / 日期 | |
 
-*版本 0.3.0 · 2026-11-01*
+*版本 0.3.1 · 2026-11-02*

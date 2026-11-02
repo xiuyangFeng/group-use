@@ -26,7 +26,7 @@ from core.console import setup_utf8_stdio
 from core.fsutil import human_bytes  # noqa: E402
 from core.vault import Vault  # noqa: E402
 
-PASSWORD = "bench-password-1234"
+PASSWORD = "Bench-Password-1234"
 
 
 def make_files(root: Path, count: int, size: int) -> None:

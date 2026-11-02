@@ -9,7 +9,7 @@ from core.errors import PasswordError, RecoveryKeyError
 from core.vault import Vault
 from tests.conftest import PASSWORD, make_tree
 
-NEW_PW = "new-password-5678"
+NEW_PW = "New-Password-5678"
 
 
 def setup(tmp_path, audit_dir):

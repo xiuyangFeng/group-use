@@ -18,7 +18,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-PASSWORD = "acceptance-password-1234"
+PASSWORD = "Acceptance-Password-1234"
 MARKER = "ACCEPTANCE-PLAINTEXT-MARKER-7f3a9c"
 _ok = 0
 _failed: list[str] = []

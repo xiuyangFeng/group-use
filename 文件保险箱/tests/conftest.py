@@ -17,7 +17,7 @@ sys.path.insert(0, str(PROJECT))
 # GUI 测试一律走离屏渲染：不弹窗、不依赖屏幕，CI 也能跑
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-PASSWORD = "test-password-1234"
+PASSWORD = "Test-Password-1234"
 
 
 # ---------------------------------------------------------------- 环境

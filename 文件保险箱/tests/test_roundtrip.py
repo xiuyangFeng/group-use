@@ -169,13 +169,20 @@ def test_unlock_refuses_when_blob_missing(tmp_path, audit_dir):
 
 
 def test_short_password_rejected(tmp_path, audit_dir):
+    """密码规则：至少 8 位，且必须同时含数字、大写、小写；不合格的不能建库。"""
+    from core import passwords
+
     root = tmp_path / "data"
     root.mkdir()
     (root / "a.txt").write_bytes(b"x")
-    v = open_vault(root, audit_dir)
-    with pytest.raises(VaultError):
-        v.create("short")
-    assert not (root / ".vault").exists()
+    # 合法的 8 位样例（规则函数本身也要对）
+    assert passwords.password_problems("Abcdef12") == []
+    for bad in ("short", "alllowercase1", "ALLUPPERCASE1", "NoDigitsHere", "Ab1"):
+        v = open_vault(root, audit_dir)
+        with pytest.raises(VaultError) as exc:
+            v.create(bad)
+        assert "不符合要求" in str(exc.value)
+        assert not (root / ".vault").exists()
 
 
 def test_create_twice_rejected(tmp_path, audit_dir):

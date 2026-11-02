@@ -318,8 +318,18 @@ def main() -> int:
         wiz.next()
         pump()
         assert wiz.currentId() == wiz.PAGE_PASSWORD
+        # 密码框实时核对：不合格时要立刻显示缺哪条，而不是一直空白等待
+        wiz.page_password.pw1.setText("short")
+        wiz.page_password.pw2.setText("short")
+        pump()
+        assert not wiz.page_password.isComplete()
+        assert "至少 8 位" in wiz.page_password.rules.text()
+        assert "还没满足" in wiz.page_password.hint.text()
         wiz.page_password.pw1.setText(PASSWORD)
         wiz.page_password.pw2.setText(PASSWORD)
+        pump()
+        assert wiz.page_password.isComplete()
+        assert "✓ 两次一致" in wiz.page_password.hint.text()
         wiz.next()
         pump()
         assert wiz.currentId() == wiz.PAGE_RECOVERY

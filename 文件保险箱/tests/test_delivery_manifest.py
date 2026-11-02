@@ -17,7 +17,7 @@ def test_manifest_empty_project(tmp_path):
 
 def test_manifest_with_artifacts_and_reports(tmp_path):
     (tmp_path / "dist").mkdir()
-    artifact = tmp_path / "dist" / "文件保险箱-0.3.0-macOS-arm64.zip"
+    artifact = tmp_path / "dist" / "文件保险箱-0.3.1-macOS-arm64.zip"
     artifact.write_bytes(b"fake package")
     (tmp_path / "reports").mkdir()
     (tmp_path / "reports" / "bench-10k-10gb.json").write_text(
@@ -28,7 +28,7 @@ def test_manifest_with_artifacts_and_reports(tmp_path):
     (tmp_path / "docs" / "验收清单.md").write_text("| 1 | ✅ |\n| 2 | ✅ |\n| 3 | ☑ |\n", encoding="utf-8")
 
     md = dm.build_manifest(tmp_path)
-    assert "文件保险箱-0.3.0-macOS-arm64.zip" in md
+    assert "文件保险箱-0.3.1-macOS-arm64.zip" in md
     assert dm.sha256(artifact) in md
     assert "解锁 44.3 s" in md
     assert "通过 ✅ 2 项" in md and "真机待确认 ☑ 1 项" in md

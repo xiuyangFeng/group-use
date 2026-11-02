@@ -27,7 +27,7 @@ from core.console import setup_utf8_stdio
 from core import constants as C  # noqa: E402
 from core.vault import Vault  # noqa: E402
 
-PASSWORD = "stress-cycles-password-1234"
+PASSWORD = "Stress-Cycles-Password-1234"
 
 
 def make_files(root: Path) -> list[str]:

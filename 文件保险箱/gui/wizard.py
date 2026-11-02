@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.control import OperationControl
+from core import passwords
 from core.errors import VaultError
 from core.vault import Vault
 
@@ -127,19 +128,29 @@ class PasswordPage(QWizardPage):
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(10)
 
-        lay.addWidget(label("密码（至少 12 位）"))
+        lay.addWidget(label(f"密码（{passwords.password_rule_text()}）"))
         self.pw1 = QLineEdit()
         self.pw1.setEchoMode(QLineEdit.Password)
-        self.pw1.setPlaceholderText("建议用一句只有组内知道的长口令")
+        self.pw1.setPlaceholderText("例如：Lab2026Safe（自己组内约定，别写在文件夹里）")
         self.pw1.textChanged.connect(self._changed)
         lay.addWidget(self.pw1)
         lay.addWidget(label("再输一遍"))
         self.pw2 = QLineEdit()
         self.pw2.setEchoMode(QLineEdit.Password)
+        self.pw2.setPlaceholderText("再输一遍，确认没有打错")
         self.pw2.textChanged.connect(self._changed)
         lay.addWidget(self.pw2)
 
+        self.rules = label("", role="muted", wrap=True)
+        self.rules.setTextFormat(Qt.RichText)
+        lay.addWidget(self.rules)
+
+        self.show_pw = QCheckBox("显示密码（确认没有打错字）")
+        self.show_pw.toggled.connect(self._toggle_echo)
+        lay.addWidget(self.show_pw)
+
         self.hint = label("", role="muted", wrap=True)
+        self.hint.setTextFormat(Qt.RichText)
         lay.addWidget(self.hint)
 
         warn = QFrame()
@@ -158,13 +169,35 @@ class PasswordPage(QWizardPage):
         )
         lay.addWidget(warn)
         lay.addStretch(1)
+        self._changed()  # 一进页面就把规则显示出来，不用等用户打第一个字
+
+    def _toggle_echo(self, shown: bool) -> None:
+        mode = QLineEdit.Normal if shown else QLineEdit.Password
+        self.pw1.setEchoMode(mode)
+        self.pw2.setEchoMode(mode)
 
     def _changed(self) -> None:
+        a, b = self.pw1.text(), self.pw2.text()
+        # 实时勾选：输入时就告诉用户还缺哪条，而不是等提交后弹错。
+        lines = []
+        for text, ok in passwords.password_rules(a):
+            mark, color = ("✓", GREEN) if ok else ("○", MUTED)
+            lines.append(f'<span style="color:{color}">{mark} {text}</span>')
+        self.rules.setText("<br>".join(lines))
+        if not b:
+            hint, color = "再输一遍确认；两次一致后“下一步”才会亮。", MUTED
+        elif a != b:
+            hint, color = "✗ 两次输入不一致，请检查", RED
+        elif passwords.password_ok(a):
+            hint, color = "✓ 两次一致，密码符合要求，可以点“下一步”", GREEN
+        else:
+            hint, color = "两次一致，但密码还没满足上面的要求", RED
+        self.hint.setText(f'<span style="color:{color}">{hint}</span>')
         self.completeChanged.emit()
 
     def _ok(self) -> bool:
         a, b = self.pw1.text(), self.pw2.text()
-        return len(a) >= 12 and a == b
+        return passwords.password_ok(a) and a == b
 
     def isComplete(self) -> bool:  # noqa: N802
         return self._ok()

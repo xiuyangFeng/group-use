@@ -17,7 +17,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core import __version__, constants as C, crypto, fsutil
+from core import __version__, constants as C, crypto, fsutil, passwords
 from core.console import setup_utf8_stdio
 from core.audit import AuditLog
 from core.errors import (
@@ -129,7 +129,7 @@ def print_recovery_key(recovery_key: str, fingerprint: str) -> None:
 def confirm_backup() -> bool:
     print("开始前请确认三件事：")
     print("  1. 这个文件夹里的重要数据已经另外备份过（移动硬盘 / 另一台电脑）；")
-    print("  2. 密码是组里共用的，至少 12 位，建议用一句长口令；")
+    print(f"  2. 密码是组里共用的：{passwords.password_rule_text()}；")
     print("  3. 恢复密钥会显示一次，需要抄在纸上保存好。")
     try:
         ans = input("都确认了请输入 YES 继续（其它任意键退出）：").strip()
@@ -156,7 +156,7 @@ def cmd_create(args) -> int:
             return EXIT["ok"]
     reader = SecretReader(args.password_stdin)
     password = reader.ask(
-        f"设置密码（至少 {C.MIN_PASSWORD_LEN} 位）：",
+        f"设置密码（{passwords.password_rule_text()}）：",
         confirm=None if args.password_stdin else "再输一次：",
     )
     pp = ProgressPrinter(_progress_enabled(args))
@@ -322,7 +322,7 @@ def cmd_change_password(args) -> int:
     reader = SecretReader(args.password_stdin)
     old = reader.ask("原密码：")
     new = reader.ask(
-        f"新密码（至少 {C.MIN_PASSWORD_LEN} 位）：",
+        f"新密码（{passwords.password_rule_text()}）：",
         confirm=None if args.password_stdin else "再输一次：",
     )
     vault.change_password(old, new)
@@ -343,7 +343,7 @@ def cmd_reset_password(args) -> int:
         rec_text = getpass.getpass("恢复密钥：").strip()
     key = crypto.recovery_key_parse(rec_text)
     new = reader.ask(
-        f"新密码（至少 {C.MIN_PASSWORD_LEN} 位）：",
+        f"新密码（{passwords.password_rule_text()}）：",
         confirm=None if args.password_stdin else "再输一次：",
     )
     vault.reset_with_recovery_key(key, new)

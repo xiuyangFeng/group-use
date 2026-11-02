@@ -30,8 +30,8 @@ from core.console import setup_utf8_stdio  # noqa: E402
 
 os.environ.setdefault("FDVAULT_KDF_FAST", "1")  # 彩排只验证流程，不测 Argon2 耗时
 
-PASSWORD = "pilot-password-1234"
-NEW_PASSWORD = "pilot-password-5678"
+PASSWORD = "Pilot-Password-1234"
+NEW_PASSWORD = "Pilot-Password-5678"
 MARKER = "PILOT-REHEARSAL-PLAINTEXT-MARKER-c41d"
 
 _steps: list[dict] = []

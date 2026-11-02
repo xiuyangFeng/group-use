@@ -21,7 +21,7 @@ def test_cli_version_matches_gui():
 
     from gui import __version__ as gui_v
 
-    assert core_v == gui_v == "0.3.0"
+    assert core_v == gui_v == "0.3.1"
 
 
 def test_cli_survives_non_utf8_console(tmp_path, audit_dir):
@@ -29,7 +29,7 @@ def test_cli_survives_non_utf8_console(tmp_path, audit_dir):
     env = {"PYTHONIOENCODING": "cp1252"}
     r = run_cli(["--version"], audit_dir=None, env_extra=env)
     assert r.returncode == 0, r.stderr
-    assert "文件保险箱 0.3.0" in r.stdout
+    assert "文件保险箱 0.3.1" in r.stdout
 
     root = tmp_path / "data"
     make_tree(root)

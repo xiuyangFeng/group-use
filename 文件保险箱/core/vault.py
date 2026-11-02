@@ -23,7 +23,7 @@ from typing import Callable, Iterable
 from cryptography.exceptions import InvalidTag
 
 from . import constants as C
-from . import crypto, fsutil, transform
+from . import crypto, fsutil, passwords, transform
 from .audit import AuditLog
 from .control import OperationControl
 from .errors import (
@@ -309,8 +309,7 @@ class Vault:
             leftovers = [p.name for p in self.vault_dir.iterdir() if p.name != "instance.lock"]
             if leftovers:
                 raise AlreadyVaultError("文件夹里有 .vault 但缺少 header.json，可能上次创建没完成；请先备份整个文件夹再排查")
-        if len(password) < C.MIN_PASSWORD_LEN:
-            raise VaultError(f"密码至少 {C.MIN_PASSWORD_LEN} 位（组内共用，建议用一句长口令）")
+        passwords.validate_password(password)
 
         scan, total_bytes, skipped = fsutil.scan_tree(self.root, {C.VAULT_DIRNAME, C.MARKER_NAME})
         max_file = max((e.size for e in scan if not e.is_dir), default=0)
@@ -1010,8 +1009,7 @@ class Vault:
     def change_password(self, old_password: str, new_password: str) -> None:
         self._require_vault()
         self._require_stable_state()
-        if len(new_password) < C.MIN_PASSWORD_LEN:
-            raise VaultError(f"新密码至少 {C.MIN_PASSWORD_LEN} 位")
+        passwords.validate_password(new_password, field="新密码")
         h = self.header
         kek = crypto.derive_kek(old_password, h.kdf_salt, h.kdf)
         try:
@@ -1031,8 +1029,7 @@ class Vault:
     def reset_with_recovery_key(self, recovery_key: bytes, new_password: str) -> None:
         self._require_vault()
         self._require_stable_state()
-        if len(new_password) < C.MIN_PASSWORD_LEN:
-            raise VaultError(f"新密码至少 {C.MIN_PASSWORD_LEN} 位")
+        passwords.validate_password(new_password, field="新密码")
         h = self.header
         kek = crypto.recovery_kek(recovery_key, h.vault_id)
         try:

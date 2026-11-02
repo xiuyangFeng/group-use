@@ -16,7 +16,7 @@ from pathlib import Path
 
 from core.console import hard_exit
 
-PASSWORD = "selfcheck-password-1234"
+PASSWORD = "Selfcheck-Password-1234"
 _ok = 0
 _failed: list[str] = []
 _lines: list[str] = []

@@ -32,7 +32,7 @@ MARKER_TEXT = """这个文件夹已经用「文件保险箱」上锁。
 TMP_SUFFIXES = (".fdv-part", ".fdv-tmp")
 
 DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024  # 4 MiB
-MIN_PASSWORD_LEN = 12
+MIN_PASSWORD_LEN = 8
 
 # 磁盘空间预留
 SPACE_RESERVE_BYTES = 32 * 1024 * 1024
