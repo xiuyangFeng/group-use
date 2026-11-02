@@ -6,7 +6,7 @@
 ## 源码仓库
 
 组内私有仓库：<https://github.com/xiuyangFeng/group-use>（`文件保险箱/` 是其中一个子项目，另一个是 `脱敏小软件/`）。
-安装包优先从该仓库的 [Releases](https://github.com/xiuyangFeng/group-use/releases) 下载；仓库只有源码，不放二进制。
+安装包优先从该仓库的 [Releases](https://github.com/xiuyangFeng/group-use/releases) 下载（最新 [v0.3.1](https://github.com/xiuyangFeng/group-use/releases/tag/v0.3.1)）；仓库只有源码，不放二进制。
 合并原因、历史保留方式、旧仓库删除步骤见 [仓库迁移说明](docs/仓库迁移说明.md)。
 
 ## 当前状态
