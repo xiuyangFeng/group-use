@@ -5,10 +5,10 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 from . import theme
-from .history import folder_status, history_path, load_runs, open_path, summarize
+from .history import folder_status, load_runs, open_path, summarize
 
-RUN_COLS = (("start", "开始时间", 150), ("kind", "类型", 70), ("result", "结果", 170),
-            ("input", "原始数据文件夹", 300), ("count", "患者/文件夹", 90), ("files", "写出/总文件", 110))
+RUN_COLS = (("start", "开始时间", 150), ("kind", "类型", 70), ("result", "结果", 330),
+            ("input", "原始数据文件夹", 240), ("count", "患者/文件夹", 90), ("files", "写出/总文件", 110))
 
 
 class HistoryWindow:
@@ -16,65 +16,90 @@ class HistoryWindow:
         self.app = app
         self.win = tk.Toplevel(app.root)
         self.win.title("处理记录")
-        sh = self.win.winfo_screenheight()
-        self.win.geometry(f"{theme.scaled(app.root, 1080)}x{min(theme.scaled(app.root, 760), int(sh * 0.85))}")
+        sw, sh = self.win.winfo_screenwidth(), self.win.winfo_screenheight()
+        self.win.geometry(f"{min(theme.scaled(app.root, 1120), int(sw * 0.94))}x"
+                          f"{min(theme.scaled(app.root, 800), int(sh * 0.88))}")
+        self.win.minsize(theme.scaled(app.root, 860), theme.scaled(app.root, 600))
         self.win.configure(bg=theme.BG)
         self.runs = load_runs()
 
-        frm = ttk.Frame(self.win, padding=14)
+        frm = ttk.Frame(self.win, padding=(20, 16, 20, 18))
         frm.pack(fill="both", expand=True)
+        frm.columnconfigure(0, weight=1)
+
+        # ---- 标题
         head = ttk.Frame(frm)
-        head.pack(fill="x")
-        ttk.Label(head, style="BgHint.TLabel",
-                  text=f"记录保存在 {history_path()}\n（只有时间、路径和数量，不含患者信息；每个患者的明细在映射表里）"
-                  ).pack(side="left")
-        ttk.Button(head, text="用主窗口当前的原始数据文件夹和映射表核对",
-                   command=self.check_current_paths).pack(side="right")
+        head.grid(row=0, column=0, sticky="ew")
+        titles = ttk.Frame(head)
+        titles.pack(side="left")
+        ttk.Label(titles, text="处理记录", style="BgTitle.TLabel").pack(anchor="w")
+        ttk.Label(titles, style="BgHint.TLabel",
+                  text=f"共 {len(self.runs)} 次 · 只记时间、路径和数量，不含患者信息（每个患者的明细在映射表里）"
+                  ).pack(anchor="w", pady=(2, 0))
+        ttk.Button(head, text="用主窗口当前路径核对", style="Small.TButton",
+                   command=self.check_current_paths).pack(side="right", anchor="s")
 
-        top = ttk.Frame(frm)
-        top.pack(fill="x", pady=(8, 0))
-        self.runs_tv = self._tree(top, RUN_COLS, height=6)
+        # ---- 记录列表
+        outer, c = theme.card(frm, padding=0)
+        outer.grid(row=1, column=0, sticky="nsew", pady=(14, 0))
+        frm.rowconfigure(1, weight=2)
+        self.runs_tv = self._tree(c, RUN_COLS, height=6)
         for i, r in enumerate(self.runs):
-            self.runs_tv.insert("", "end", iid=str(i), values=self._run_values(r), tags=(self._run_tag(r),))
+            self.runs_tv.insert("", "end", iid=str(i), values=self._run_values(r),
+                                tags=(self._run_tag(r), "odd" if i % 2 else "even"))
         self.runs_tv.bind("<<TreeviewSelect>>", lambda e: self.show_run())
+        if not self.runs:
+            tk.Label(c, text="还没有处理记录\n\n以前用旧版本处理过的数据：在主窗口填好原始数据文件夹和映射表，\n"
+                             "再点右上角“用主窗口当前路径核对”，就能看出哪些子文件夹已经处理过",
+                     bg=theme.CARD, fg=theme.MUTED, font=theme.font(), justify="center"
+                     ).place(relx=0.5, rely=0.55, anchor="center")
 
-        self.info = tk.Text(frm, height=8, state="disabled", wrap="word")
-        theme.style_text(self.info)
-        self.info.configure(highlightthickness=1, highlightbackground=theme.BORDER)
-        self.info.pack(fill="x", pady=(10, 8))
+        # ---- 选中记录的概况 + 操作
+        outer, c = theme.card(frm, padding=(18, 14, 18, 14))
+        outer.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        c.columnconfigure(0, weight=1)
+        top = ttk.Frame(c, style="Card.TFrame")
+        top.grid(row=0, column=0, sticky="ew")
+        self.sel_dot = theme.Dot(top, "idle")
+        self.sel_dot.pack(side="left", padx=(0, 8))
+        self.sel_title = ttk.Label(top, text="选中上面的一条记录查看详情", style="CardTitle.TLabel")
+        self.sel_title.pack(side="left")
+        self.kv = ttk.Frame(c, style="Card.TFrame")
+        self.kv.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self.kv.columnconfigure(1, weight=1)
 
-        btns = ttk.Frame(frm)
-        btns.pack(fill="x")
+        btns = ttk.Frame(c, style="Card.TFrame")
+        btns.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         self.buttons = [
             ttk.Button(btns, text="这次处理了哪些文件夹", command=self.show_batch),
-            ttk.Button(btns, text="核对原始数据文件夹（哪些还没处理）", command=self.show_folder_status),
+            ttk.Button(btns, text="核对：哪些还没处理", command=self.show_folder_status),
             ttk.Button(btns, text="填入这组路径", command=self.use_paths),
             ttk.Button(btns, text="打开日志/报告", command=lambda: self.open_field("log")),
             ttk.Button(btns, text="打开映射表", command=lambda: self.open_field("mapping")),
             ttk.Button(btns, text="打开输出文件夹", command=lambda: self.open_field("output")),
         ]
-        for b in self.buttons:
+        for i, b in enumerate(self.buttons):
             b.configure(style="Small.TButton")
-            b.pack(side="left", padx=(0, 6))
+            b.pack(side="left", padx=(16 if i in (2, 3) else 0, 6))
             b.state(["disabled"])
 
-        bottom = ttk.Frame(frm)
-        bottom.pack(fill="both", expand=True, pady=(6, 0))
-        self.detail_title = ttk.Label(bottom, text="", font=theme.font(0, bold=True))
-        self.detail_title.pack(anchor="w", pady=(0, 4))
-        self.detail_tv = self._tree(bottom, (), height=6)
+        # ---- 明细表
+        outer, c = theme.card(frm, padding=0)
+        outer.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        frm.rowconfigure(3, weight=3)
+        self.detail_title = ttk.Label(c, text="明细：点上面的“这次处理了哪些文件夹”或“核对：哪些还没处理”",
+                                      style="Hint.TLabel", padding=(16, 10, 16, 8))
+        self.detail_title.pack(anchor="w")
+        tk.Frame(c, bg=theme.BORDER, height=1).pack(fill="x")
+        self.detail_tv = self._tree(c, (), height=6)
 
         if self.runs:
             self.runs_tv.selection_set("0")
-        else:
-            self._set_info("还没有处理记录（这个版本开始才有记录）。\n"
-                           "以前用旧版本处理过的数据，可以在主窗口填好原始数据文件夹和映射表，"
-                           "再点右上角的按钮核对哪些子文件夹已经处理过。")
 
     # ---------- 工具
     @staticmethod
     def _tree(parent, cols, height):
-        box = ttk.Frame(parent)
+        box = ttk.Frame(parent, style="Card.TFrame")
         box.pack(fill="both", expand=True)
         tv = ttk.Treeview(box, show="headings", height=height)
         sb = ttk.Scrollbar(box, orient="vertical", command=tv.yview)
@@ -83,7 +108,8 @@ class HistoryWindow:
         tv.tag_configure("good", foreground=theme.OK)
         tv.tag_configure("warn", foreground=theme.WARN)
         tv.tag_configure("bad", foreground=theme.DANGER)
-        sb.pack(side="right", fill="y")
+        tv.tag_configure("odd", background=theme.STRIPE)
+        sb.pack(side="right", fill="y", padx=(0, 2), pady=2)
         HistoryWindow._set_columns(tv, cols)
         return tv
 
@@ -92,8 +118,8 @@ class HistoryWindow:
         tv.delete(*tv.get_children())
         tv["columns"] = [c[0] for c in cols]
         for key, title, width in cols:
-            tv.heading(key, text=title)
-            tv.column(key, width=width, stretch=key in ("input", "folder", "note"))
+            tv.heading(key, text=title, anchor="w")
+            tv.column(key, width=width, stretch=key in ("input", "folder", "note"), anchor="w")
 
     @staticmethod
     def _run_tag(r):
@@ -114,10 +140,24 @@ class HistoryWindow:
         return (r.get("start", ""), r.get("kind", ""), r.get("result", ""), r.get("input", ""), count, files)
 
     def _set_info(self, text):
-        self.info.config(state="normal")
-        self.info.delete("1.0", "end")
-        self.info.insert("end", text)
-        self.info.config(state="disabled")
+        """把 summarize() 的多行文字排成“键：值”两列。第一行作标题。"""
+        for w in self.kv.winfo_children():
+            w.destroy()
+        lines = text.split("\n")
+        self.sel_title.configure(text=lines[0].replace("  ", " · ", 1))
+        for i, line in enumerate(lines[1:]):
+            k, sep, v = line.partition("：")
+            if not sep:
+                k, v = "", line
+            ttk.Label(self.kv, text=k, style="Hint.TLabel").grid(row=i, column=0, sticky="nw", padx=(0, 14), pady=1)
+            ttk.Label(self.kv, text=v, style="Card.TLabel", wraplength=theme.scaled(self.win, 900),
+                      justify="left").grid(row=i, column=1, sticky="w", pady=1)
+
+    @staticmethod
+    def _stripe(tv):
+        for i, iid in enumerate(tv.get_children()):
+            tags = [t for t in tv.item(iid, "tags") if t != "odd"]
+            tv.item(iid, tags=tags + (["odd"] if i % 2 else []))
 
     def _run(self):
         sel = self.runs_tv.selection()
@@ -129,6 +169,7 @@ class HistoryWindow:
         if not r:
             return
         self._set_info(summarize(r))
+        self.sel_dot.set({"good": "ok", "warn": "warn", "bad": "error"}[self._run_tag(r)])
         is_deid = r.get("kind") == "脱敏"
         for b in self.buttons:
             b.state(["!disabled"])
@@ -136,7 +177,8 @@ class HistoryWindow:
             for b in self.buttons[:3] + self.buttons[4:]:
                 b.state(["disabled"])
         self._set_columns(self.detail_tv, ())
-        self.detail_title.config(text="")
+        self.detail_title.config(text="明细：点上面的“这次处理了哪些文件夹”或“核对：哪些还没处理”",
+                                 style="Hint.TLabel")
 
     def _read_mapping_rows(self, r):
         from .mapping import read_rows
@@ -167,6 +209,8 @@ class HistoryWindow:
                                                      x.get("DICOM文件数") or "", x.get("时间点") or "",
                                                      x.get("处理时间") or ""),
                                   tags=({0: "bad", 1: "warn", 2: "good"}[self._state(x)[0]],))
+        self._stripe(self.detail_tv)
+        self.detail_title.config(style="CardTitle.TLabel")
         if rows:
             self.detail_title.config(text=f"这次处理的文件夹：{len(rows)} 个（来自映射表）")
         else:
@@ -208,7 +252,9 @@ class HistoryWindow:
             self.detail_tv.insert("", "end", values=(name, state, row.get("编号") or "", row.get("状态") or "",
                                                      row.get("处理时间") or "", row.get("备注") or ""),
                                   tags=({0: "bad", 1: "warn", 2: "good"}[order],))
+        self._stripe(self.detail_tv)
         self.detail_title.config(
+            style="CardTitle.TLabel",
             text=f"{inp} 现有 {len(items)} 个子文件夹：已完成 {n_done}，未完成/失败 {n_todo}，从未处理 {n_new}。"
                  f"（用这个映射表核对）")
 
