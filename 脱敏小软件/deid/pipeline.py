@@ -24,6 +24,7 @@ from .anonymizer import (UidMapper, anonymize, collect_needles, compute_age, ele
 from pydicom.datadict import keyword_for_tag
 from .history import new_run_id, record
 from .mapping import MappingTable, backup_mapping, check_writable
+from . import vault_link
 
 DICOMDIR_CLASS = "1.2.840.10008.1.3.10"
 IGNORED_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
@@ -706,6 +707,7 @@ class Job:
         self.log_path = unique_path(self.mapping_path.parent / f"脱敏日志_{stamp}.txt")
         self._log_lines = []
         self.run_id = None   # 确认开始后才生成，写进处理记录和映射表的“批次”列
+        self.vaults = {}     # 用到的已解锁保险箱 {根目录: [原始数据/输出/映射表]}，run() 开始时填
         self.stats = {}
 
     def log(self, msg=""):
@@ -719,6 +721,11 @@ class Job:
 
     def check_paths(self):
         inp, out, mp = self.input_dir, self.output_dir, self.mapping_path
+        # 先看保险箱：锁着的保险箱里文件“不存在”，不先查会误报成“找不到文件夹”或悄悄新建空映射表
+        for path, what in ((inp, "原始数据文件夹"), (mp, "映射表"), (out, "输出文件夹")):
+            err = vault_link.locked_problem(path, what)
+            if err:
+                return err
         if not inp.is_dir():
             return f"输入文件夹不存在：{inp}"
         if out == inp or out.is_relative_to(inp) or inp.is_relative_to(out):
@@ -737,8 +744,11 @@ class Job:
         self._q = multiprocessing.Queue()
         self._pool = ProcessPoolExecutor(self.workers, initializer=_init_worker,
                                          initargs=(self._q, self.control.run_event, self.control.stop_event))
+        # 用到的保险箱（已解锁的）在处理期间标记为“正在使用”，保险箱不会中途自动上锁
+        self.vaults = vault_link.vaults_in_use(self.input_dir, self.output_dir, self.mapping_path)
         try:
-            return self._run()
+            with vault_link.InUse(self.vaults, log=self.log):
+                return self._run()
         finally:
             self._pool.shutdown(wait=True, cancel_futures=True)
 
@@ -866,6 +876,12 @@ class Job:
         if old_layout:
             lines.append(f"[注意] 输出文件夹里 {', '.join(old_layout[:10])}{' 等' if len(old_layout) > 10 else ''} "
                          f"是旧版本目录结构（没有 T1/T2 层），这些患者会被跳过。建议换一个新的输出文件夹，编号不会变。")
+        for root, what in self.vaults.items():
+            lines.append(f"[保险箱] {'、'.join(what)}在保险箱「{root.name}」里。处理期间它不会自动上锁，"
+                         f"处理完记得在「文件保险箱」里锁回。")
+            if "输出" in what:
+                lines.append(f"[注意] 输出文件夹在保险箱「{root.name}」里：保险箱锁回时脱敏结果也会被加密，"
+                             f"发出去前还得再解锁。要发给别人的数据建议放在保险箱外面。")
         need = sum(f.size for ss in groups.values() for s in ss for f in s.files)
         free = disk_free(self.output_dir)
         lines.append(f"预计输出约 {need / 1e9:.1f} GB，输出盘剩余 {free / 1e9:.1f} GB")
@@ -1103,5 +1119,8 @@ class Job:
         self.log(f"映射表已更新：{self.mapping_path}")
         self.log(f"日志：{self.log_path}")
         self.log("提醒：映射表和日志含患者信息，只能留在本地，不要随数据发出。")
+        if self.vaults:
+            names = "、".join(f"「{r.name}」" for r in self.vaults)
+            self.log(f"提醒：处理已结束，请在「文件保险箱」里把 {names} 锁回。")
         self._flush_log()
         return ok, result

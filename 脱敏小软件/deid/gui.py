@@ -12,7 +12,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from . import theme
+from . import theme, vault_link
 from .history import last_deid_run, load_runs, open_path
 from .pipeline import MAX_WORKERS, Control, Job, is_disk_full
 
@@ -38,10 +38,27 @@ def _inside(a, b):
 
 def check_paths(inp, out, mp):
     """三个路径各自的检查结果 [(kind, 文字)]，kind: ok / info / warn / error / idle。只读，不创建任何东西。"""
-    res = []
     pi = Path(inp).expanduser() if inp else None
     po = Path(out).expanduser() if out else None
     pm = Path(mp).expanduser() if mp else None
+    res = _check_plain(pi, po, pm)
+    # 「文件保险箱」：锁着的保险箱里的东西看起来“不存在”，要先解锁；输出放在保险箱里会跟着被加密
+    for i, (path, what) in enumerate(((pi, "原始数据"), (po, "输出文件夹"), (pm, "映射表"))):
+        if not path or res[i][0] == "idle":
+            continue
+        problem = vault_link.locked_problem(path, what)
+        root = vault_link.find_vault(path)
+        if problem:
+            res[i] = ("error", problem)
+        elif root is not None and i == 1 and res[i][0] != "error":
+            res[i] = ("warn", f"在保险箱「{root.name}」里：锁回时脱敏结果也会被加密。要发出去的数据建议放在保险箱外面")
+        elif root is not None and res[i][0] in ("ok", "info"):
+            res[i] = (res[i][0], f"{res[i][1]}（在已解锁的保险箱「{root.name}」里，处理期间不会自动上锁）")
+    return res
+
+
+def _check_plain(pi, po, pm):
+    res = []
 
     if not pi:
         res.append(("idle", "还没有选择"))
