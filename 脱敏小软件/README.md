@@ -153,9 +153,9 @@ uv venv .venv -p 3.12 && uv pip install -p .venv/bin/python -r requirements.txt 
 
 产物都用 PyInstaller 把 Python 解释器、tkinter、pydicom、openpyxl 一起打进去，打包后会用假数据跑一遍完整脱敏（含多进程）做自检。
 
-- **Windows exe**：PyInstaller 不能在 Mac 上打 Windows 包。项目在 GitHub 私有仓库 `xiuyangFeng/CT_Deid`，每次 `git push` 后 `.github/workflows/build-windows.yml` 会在云端 Windows 上跑测试 → 打包 → 用 exe 自检 → 产出 `CT_Deid_Windows.zip`。下载：
+- **Windows exe**：PyInstaller 不能在 Mac 上打 Windows 包。项目在组内私有仓库 `xiuyangFeng/group-use` 的 `脱敏小软件/` 目录，改动推送到 `main` 后，仓库根目录的 `.github/workflows/build-deid-windows.yml` 会在云端 Windows 上跑测试 → 打包 → 用 exe 自检 → 产出 `CT_Deid_Windows.zip`（本目录下的 `.github/` 是迁移前的旧配置，已不生效）。下载：
   ```bash
-  gh run download -R xiuyangFeng/CT_Deid -n CT_Deid_Windows -D release   # 最近一次成功的构建
+  gh run download -R xiuyangFeng/group-use -n CT_Deid_Windows -D release   # 最近一次成功的构建
   ```
   也可以在 Windows 电脑上装 Python 3.12 后双击 `build_windows.bat`，产物在 `dist\CT_Deid.exe`（拷贝项目时不要带 `.venv*` 文件夹）
 - **Mac app**（需要 [uv](https://docs.astral.sh/uv/)）：
