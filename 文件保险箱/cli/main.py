@@ -255,6 +255,8 @@ def cmd_status(args) -> int:
     print(f"内容：  {st['file_count']} 个文件 / {fsutil.human_bytes(st['total_bytes'])}")
     print(f"恢复密钥指纹：{st['recovery_fingerprint']}")
     print(f"审计日志：{vault._audit_dir / 'audit.jsonl'}")
+    if st["in_use_by"]:
+        print(f"正在使用：{st['in_use_by']}（用完之前不能上锁）")
     if st["needs_recovery"]:
         print()
         print("⚠ 上次操作没有完成，请运行：python -m cli.main recover <文件夹>")

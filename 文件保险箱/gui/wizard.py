@@ -1,4 +1,8 @@
-"""新建保险箱向导：选文件夹 → 设密码 → 抄恢复密钥 → 首次上锁。"""
+"""新建保险箱向导：选文件夹 → 设密码 → 抄恢复密钥 → 首次上锁。
+
+从主窗口进来时文件夹已经选好（按钮先弹选择框 / 拖进来 / 右键菜单），
+这时直接从「设密码」开始，少一步。
+"""
 
 from __future__ import annotations
 
@@ -9,9 +13,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QFileDialog,
-    QFrame,
     QHBoxLayout,
-    QLabel,
     QLineEdit,
     QMessageBox,
     QProgressBar,
@@ -20,54 +22,51 @@ from PySide6.QtWidgets import (
     QWizardPage,
 )
 
+from core import fsutil
 from core.control import OperationControl
-from core import passwords
 from core.errors import VaultError
 from core.vault import Vault
 
 from .store import AppStore
-from .style import BLUE, GREEN, MUTED, RED, button, label, spacer
+from .style import GREEN, MUTED, RED, button, hero_header, label
+from .widgets import PasswordPair, RecoveryKeyCard
 from .workers import VaultOpWorker
+
+
+def folder_problem(path: str | Path) -> str | None:
+    """这个文件夹能不能拿来新建保险箱；能就返回 None，不能返回一句原因。"""
+    p = Path(path).expanduser()
+    if not str(path).strip() or not p.is_dir():
+        return "不是一个文件夹"
+    if p.name.startswith(".") or p.resolve() == Path.home().resolve():
+        return "请选一个专门的资料文件夹，不要选隐藏文件夹或整个用户目录"
+    if (p / ".vault").exists():
+        return "这个文件夹已经是保险箱"
+    return None
 
 
 class FolderPage(QWizardPage):
     def __init__(self, wiz: "CreateWizard"):
         super().__init__()
         self.wiz = wiz
-        self.setTitle("选择要上锁的文件夹")
-        self.setSubTitle("上锁后，这个文件夹里只剩加密数据，文件名也会加密；解锁后恢复原样。")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setContentsMargins(24, 8, 24, 4)
         lay.setSpacing(12)
+        head, _t, _s = hero_header("locked", "选择要上锁的文件夹")
+        lay.addWidget(head)
+        lay.addSpacing(6)
 
         row = QHBoxLayout()
         self.path_edit = QLineEdit()
-        self.path_edit.setPlaceholderText("点右边按钮选择要上锁的文件夹")
+        self.path_edit.setPlaceholderText("文件夹路径")
         self.path_edit.textChanged.connect(self._on_changed)
         row.addWidget(self.path_edit, 1)
-        pick = button("选择文件夹…")
-        pick.clicked.connect(self._pick)
-        row.addWidget(pick)
+        row.addWidget(button("选择…", on_click=self._pick))
         lay.addLayout(row)
 
         self.hint = label("", role="muted", wrap=True)
         lay.addWidget(self.hint)
-
         lay.addStretch(1)
-        note = QFrame()
-        note.setProperty("banner", "info")
-        nl = QVBoxLayout(note)
-        nl.setContentsMargins(12, 10, 12, 10)
-        nl.addWidget(label("第一次上锁会重写文件夹里的每个文件，请先备份。", role="h2"))
-        nl.addWidget(
-            label(
-                "上锁时间取决于文件总量（实测约 200 MB/秒，10 GB 约 1 分钟）。"
-                "上锁过程中断电也不会丢数据，下次打开会让你恢复。",
-                role="muted",
-                wrap=True,
-            )
-        )
-        lay.addWidget(note)
 
     def _pick(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "选择要上锁的文件夹", self.wiz.store.last_vault_dir)
@@ -79,42 +78,27 @@ class FolderPage(QWizardPage):
         return Path(self.path_edit.text().strip()).expanduser()
 
     def isComplete(self) -> bool:  # noqa: N802
-        p = self._path()
-        if not self.path_edit.text().strip() or not p.is_dir():
-            return False
-        if p.name.startswith(".") or p == Path.home():
-            return False
-        return not (p / ".vault").exists()
+        return bool(self.path_edit.text().strip()) and folder_problem(self._path()) is None
 
     def validatePage(self) -> bool:  # noqa: N802
-        p = self._path()
-        if not p.is_dir():
-            QMessageBox.warning(self, "路径不对", "请选择一个存在的文件夹。")
+        problem = folder_problem(self._path())
+        if problem:
+            QMessageBox.warning(self, "不能用这个文件夹", problem)
             return False
-        if p.name.startswith(".") or p == Path.home():
-            QMessageBox.warning(self, "不能选这里", "请不要直接选隐藏文件夹或整个用户主目录；请选一个专门的资料文件夹。")
-            return False
-        if (p / ".vault").exists():
-            QMessageBox.warning(self, "已经是保险箱", "这个文件夹里已经有 .vault，不能重复创建。若是上次没创建完，请用「恢复」。")
-            return False
-        self.wiz.target = str(p.resolve())
+        self.wiz.target = str(self._path().resolve())
         return True
 
-    def _on_changed(self) -> None:  # noqa: F811
+    def _on_changed(self) -> None:
         self.completeChanged.emit()
-        text = self.path_edit.text().strip()
-        if not text:
+        if not self.path_edit.text().strip():
             self.hint.setText("")
             return
-        p = self._path()
-        if not p.is_dir():
-            self.hint.setText("这个路径不是文件夹")
-            self.hint.setStyleSheet(f"color:{RED};")
-        elif (p / ".vault").exists():
-            self.hint.setText("这个文件夹已经是保险箱（或上次创建没完成），换个文件夹吧")
+        problem = folder_problem(self._path())
+        if problem:
+            self.hint.setText(problem)
             self.hint.setStyleSheet(f"color:{RED};")
         else:
-            self.hint.setText(f"将把「{p.name}」整个文件夹（含子文件夹）原地加密。")
+            self.hint.setText(f"将加密「{self._path().name}」及其中所有文件")
             self.hint.setStyleSheet(f"color:{MUTED};")
 
 
@@ -122,93 +106,43 @@ class PasswordPage(QWizardPage):
     def __init__(self, wiz: "CreateWizard"):
         super().__init__()
         self.wiz = wiz
-        self.setTitle("设置组内共用密码")
-        self.setSubTitle("一个保险箱一把密码。密码决定能不能打开，忘了只能用恢复密钥。")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 4, 4, 4)
-        lay.setSpacing(10)
+        lay.setContentsMargins(24, 8, 24, 4)
+        lay.setSpacing(12)
+        head, _t, self.folder_label = hero_header("locked", "设置密码", " ")
+        lay.addWidget(head)
+        lay.addSpacing(4)
 
-        lay.addWidget(label(f"密码（{passwords.password_rule_text()}）"))
-        self.pw1 = QLineEdit()
-        self.pw1.setEchoMode(QLineEdit.Password)
-        self.pw1.setPlaceholderText("例如：Lab2026Safe（自己组内约定，别写在文件夹里）")
-        self.pw1.textChanged.connect(self._changed)
-        lay.addWidget(self.pw1)
-        lay.addWidget(label("再输一遍"))
-        self.pw2 = QLineEdit()
-        self.pw2.setEchoMode(QLineEdit.Password)
-        self.pw2.setPlaceholderText("再输一遍，确认没有打错")
-        self.pw2.textChanged.connect(self._changed)
-        lay.addWidget(self.pw2)
+        self.pair = PasswordPair(self, first_placeholder="组内共用密码")
+        self.pair.changed.connect(self.completeChanged.emit)
+        lay.addWidget(self.pair)
+        # 兼容旧代码 / 自检脚本直接访问
+        self.pw1, self.pw2 = self.pair.pw1, self.pair.pw2
+        self.rules, self.hint, self.show_pw = self.pair.rules, self.pair.hint, self.pair.show_pw
 
-        self.rules = label("", role="muted", wrap=True)
-        self.rules.setTextFormat(Qt.RichText)
-        lay.addWidget(self.rules)
-
-        self.show_pw = QCheckBox("显示密码（确认没有打错字）")
-        self.show_pw.toggled.connect(self._toggle_echo)
-        lay.addWidget(self.show_pw)
-
-        self.hint = label("", role="muted", wrap=True)
-        self.hint.setTextFormat(Qt.RichText)
-        lay.addWidget(self.hint)
-
-        warn = QFrame()
-        warn.setProperty("banner", "warn")
-        wl = QVBoxLayout(warn)
-        wl.setContentsMargins(12, 10, 12, 10)
-        wl.addWidget(label("几个提醒", role="h2"))
-        wl.addWidget(
-            label(
-                "1. 密码由全组共用，请用微信/口头等安全渠道告诉同事，别写在文件夹里。\n"
-                "2. 密码强度只影响「有人拿走硬盘后猜密码」的难度。\n"
-                "3. 千万别忘了恢复密钥——下一页显示，只显示这一次。",
-                role="muted",
-                wrap=True,
-            )
-        )
-        lay.addWidget(warn)
         lay.addStretch(1)
-        self._changed()  # 一进页面就把规则显示出来，不用等用户打第一个字
+        note = label("首次上锁会改写文件夹里的全部文件，重要数据请先备份。", role="muted", wrap=True)
+        note.setAlignment(Qt.AlignCenter)
+        lay.addWidget(note)
 
-    def _toggle_echo(self, shown: bool) -> None:
-        mode = QLineEdit.Normal if shown else QLineEdit.Password
-        self.pw1.setEchoMode(mode)
-        self.pw2.setEchoMode(mode)
-
-    def _changed(self) -> None:
-        a, b = self.pw1.text(), self.pw2.text()
-        # 实时勾选：输入时就告诉用户还缺哪条，而不是等提交后弹错。
-        lines = []
-        for text, ok in passwords.password_rules(a):
-            mark, color = ("✓", GREEN) if ok else ("○", MUTED)
-            lines.append(f'<span style="color:{color}">{mark} {text}</span>')
-        self.rules.setText("<br>".join(lines))
-        if not b:
-            hint, color = "再输一遍确认；两次一致后“下一步”才会亮。", MUTED
-        elif a != b:
-            hint, color = "✗ 两次输入不一致，请检查", RED
-        elif passwords.password_ok(a):
-            hint, color = "✓ 两次一致，密码符合要求，可以点“下一步”", GREEN
-        else:
-            hint, color = "两次一致，但密码还没满足上面的要求", RED
-        self.hint.setText(f'<span style="color:{color}">{hint}</span>')
-        self.completeChanged.emit()
+    def initializePage(self) -> None:  # noqa: N802
+        name = Path(self.wiz.target).name if self.wiz.target else ""
+        self.folder_label.setText(f"「{name}」· 组内共用" if name else "组内共用")
+        self.pw1.setFocus()
 
     def _ok(self) -> bool:
-        a, b = self.pw1.text(), self.pw2.text()
-        return passwords.password_ok(a) and a == b
+        return self.pair.is_ok()
 
     def isComplete(self) -> bool:  # noqa: N802
         return self._ok()
 
     def nextId(self) -> int:  # noqa: N802
-        # 注意：Qt 会随时调用 nextId 来更新按钮状态，这里不能做耗时操作或弹窗。
+        # Qt 会随时调用 nextId 来更新按钮状态，这里不能做耗时操作或弹窗。
         return self.wiz.PAGE_RECOVERY
 
     def validatePage(self) -> bool:  # noqa: N802
-        # 不满足条件时只返回 False（Next 按钮本来也就是灰的），不要弹窗：
-        # Qt 在程序化切页时也会调用 validatePage，弹窗会阻塞自动化测试。
+        # 不满足条件时只返回 False（下一步按钮本来就是灰的），不弹窗：
+        # Qt 在程序化切页时也会调 validatePage，弹窗会阻塞自动化测试。
         if not self._ok():
             return False
         try:
@@ -229,41 +163,25 @@ class RecoveryPage(QWizardPage):
     def __init__(self, wiz: "CreateWizard"):
         super().__init__()
         self.wiz = wiz
-        self.setTitle("抄下恢复密钥（唯一一把）")
-        self.setSubTitle("密码忘了、换人交接时用它重置密码。它只显示这一次，程序不保存。")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 4, 4, 4)
-        lay.setSpacing(10)
+        lay.setContentsMargins(24, 8, 24, 4)
+        lay.setSpacing(12)
+        head, _t, _s = hero_header("key", "抄下恢复密钥", "忘记密码时靠它找回。只显示这一次，请抄在纸上收好。")
+        lay.addWidget(head)
+        lay.addSpacing(4)
+        self.card = RecoveryKeyCard(self)
+        lay.addWidget(self.card)
+        self.key_label, self.fp_label = self.card.key_label, self.card.fp_label
 
-        box = QFrame()
-        box.setProperty("card", True)
-        box.setStyleSheet("QFrame[card=\"true\"]{background:#fffbeb;border:1px solid #fde68a;border-radius:12px;}")
-        bl = QVBoxLayout(box)
-        bl.setContentsMargins(16, 14, 16, 14)
-        bl.addWidget(label("恢复密钥", role="muted"))
-        self.key_label = label("", role="bigkey", wrap=True)
-        bl.addWidget(self.key_label)
-        self.fp_label = label("", role="muted")
-        bl.addWidget(self.fp_label)
-        lay.addWidget(box)
-
-        lay.addWidget(
-            label(
-                "建议：抄在纸上或打印出来，放进带锁的抽屉/文件柜；不要截图发微信，"
-                "也不要存在这台电脑里（等于把钥匙和锁放在一起）。丢了它 + 忘了密码 = 数据永久打不开。",
-                role="muted",
-                wrap=True,
-            )
-        )
-        self.check = QCheckBox("我已把恢复密钥抄好，并放到安全的地方")
+        self.check = QCheckBox("我已抄好")
+        self.check.setCursor(Qt.PointingHandCursor)
         self.check.stateChanged.connect(lambda _s: self.completeChanged.emit())
-        lay.addWidget(self.check)
+        lay.addWidget(self.check, 0, Qt.AlignHCenter)
         lay.addStretch(1)
 
     def initializePage(self) -> None:  # noqa: N802
         prepared = self.wiz.prepared or {}
-        self.key_label.setText(prepared.get("recovery_key", ""))
-        self.fp_label.setText(f"指纹：{prepared.get('recovery_fingerprint', '')}（可在保险箱详情里核对）")
+        self.card.set_key(prepared.get("recovery_key", ""), prepared.get("recovery_fingerprint", ""))
         self.check.setChecked(False)
 
     def isComplete(self) -> bool:  # noqa: N802
@@ -278,23 +196,29 @@ class ProgressPage(QWizardPage):
         super().__init__()
         self.wiz = wiz
         self.started = False
-        self.setTitle("正在首次上锁…")
-        self.setSubTitle("上锁完成后，这个文件夹里就只剩加密数据；请等进度走完再关闭。")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 4, 4, 4)
-        lay.setSpacing(12)
+        lay.setContentsMargins(24, 8, 24, 4)
+        lay.setSpacing(10)
+        self.head, self.head_title, _s = hero_header("locked", "正在上锁")
+        lay.addWidget(self.head)
+        lay.addSpacing(8)
 
         self.bar = QProgressBar()
         self.bar.setRange(0, 100)
+        self.bar.setTextVisible(False)
         lay.addWidget(self.bar)
+        row = QHBoxLayout()
         self.percent = label("0%", role="h2")
-        lay.addWidget(self.percent)
+        row.addWidget(self.percent)
+        row.addStretch(1)
         self.status = label("准备中…", role="muted")
-        lay.addWidget(self.status)
+        row.addWidget(self.status)
+        lay.addLayout(row)
         self.detail = label("", role="muted")
         lay.addWidget(self.detail)
         lay.addStretch(1)
-        self.warn = label("正在加密，请不要关闭程序或关机。断电也没关系，下次打开会让你恢复。", role="muted", wrap=True)
+        self.warn = label("请保持程序打开，完成前不要关机。", role="muted", wrap=True)
+        self.warn.setAlignment(Qt.AlignCenter)
         lay.addWidget(self.warn)
 
     def initializePage(self) -> None:  # noqa: N802
@@ -315,22 +239,22 @@ class ProgressPage(QWizardPage):
             self.status.setText(f"{done:,} / {total:,} 个文件")
         done_bytes = int(d.get("done_bytes") or 0)
         total_bytes = int(d.get("total_bytes") or 0)
-        from core import fsutil
-
         self.detail.setText(f"{fsutil.human_bytes(done_bytes)} / {fsutil.human_bytes(total_bytes)}")
 
     def finish_ok(self) -> None:
         self.bar.setValue(100)
         self.percent.setText("100%")
-        self.status.setText("创建完成，保险箱已上锁。")
+        self.head_title.setText("完成，已上锁")
+        self.status.setText("✓ 已上锁")
         self.status.setStyleSheet(f"color:{GREEN};font-weight:600;")
-        self.warn.setText("重要：恢复密钥只在上一页显示过。如果没抄，现在点「取消」已经晚了——它已经不在程序里。")
+        self.warn.setText("")
 
     def fail(self, msg: str) -> None:
-        self.status.setText(f"创建失败：{msg}")
-        self.status.setStyleSheet(f"color:{RED};")
-        self.status.setWordWrap(True)
-        self.warn.setText("文件夹现在处于「待恢复」状态，数据没丢。请关闭向导，在主窗口点「恢复」。".replace("点「恢复」", "点卡片上的「恢复」"))
+        self.status.setText("没有完成")
+        self.status.setStyleSheet(f"color:{RED};font-weight:600;")
+        self.detail.setText(msg)
+        self.detail.setWordWrap(True)
+        self.warn.setText("数据没丢。关掉向导后，在主窗口点「恢复」。")
 
 
 class CreateWizard(QWizard):
@@ -353,26 +277,39 @@ class CreateWizard(QWizard):
         self.worker: VaultOpWorker | None = None
 
         self.setWindowTitle("新建保险箱")
-        self.setWizardStyle(QWizard.ModernStyle)
+        self.setWizardStyle(QWizard.ClassicStyle)
         self.setOption(QWizard.NoBackButtonOnStartPage, True)
         self.setOption(QWizard.HaveHelpButton, False)
-        self.resize(680, 540)
+        self.resize(520, 500)
         self.setButtonText(QWizard.NextButton, "下一步")
         self.setButtonText(QWizard.BackButton, "上一步")
         self.setButtonText(QWizard.CancelButton, "取消")
         self.setButtonText(QWizard.FinishButton, "完成")
+        self.setButtonText(QWizard.CommitButton, "开始上锁")
 
         self.page_folder = FolderPage(self)
         self.page_password = PasswordPage(self)
         self.page_recovery = RecoveryPage(self)
         self.page_progress = ProgressPage(self)
+        # 抄完恢复密钥这一步一旦点下去就开始加密，不能再返回
+        self.page_recovery.setCommitPage(True)
         self.setPage(self.PAGE_FOLDER, self.page_folder)
         self.setPage(self.PAGE_PASSWORD, self.page_password)
         self.setPage(self.PAGE_RECOVERY, self.page_recovery)
         self.setPage(self.PAGE_PROGRESS, self.page_progress)
         if initial_path:
             self.page_folder.path_edit.setText(str(initial_path))
+            if folder_problem(initial_path) is None:
+                # 文件夹已经选好：直接从设密码开始
+                self.target = str(Path(initial_path).expanduser().resolve())
+                self.setStartId(self.PAGE_PASSWORD)
 
+        for which in (QWizard.NextButton, QWizard.CommitButton, QWizard.FinishButton):
+            b = self.button(which)
+            if b is not None:
+                b.setProperty("kind", "primary")
+                b.style().unpolish(b)
+                b.style().polish(b)
         self.currentIdChanged.connect(self._on_page_changed)
 
     # ---------------------------------------------------------------- 准备
@@ -422,7 +359,6 @@ class CreateWizard(QWizard):
         self._set_buttons_locked(False)
         self.button(QWizard.CancelButton).setEnabled(True)
         self.button(QWizard.FinishButton).setEnabled(False)
-        QMessageBox.critical(self, "首次上锁失败", msg)
 
     def _set_buttons_locked(self, locked: bool) -> None:
         for b in (QWizard.BackButton, QWizard.NextButton, QWizard.CancelButton, QWizard.FinishButton):
@@ -439,9 +375,12 @@ class CreateWizard(QWizard):
 
     # ---------------------------------------------------------------- 关闭
 
+    def _busy_box(self) -> None:
+        QMessageBox.information(self, "正在上锁", "请等它完成，大约几秒到几分钟。")
+
     def reject(self) -> None:
         if self.worker is not None and self.worker.isRunning():
-            QMessageBox.information(self, "正在首次上锁", "加密正在进行，不能关闭。断电也不会丢数据，请等它完成。")
+            self._busy_box()
             return
         if self.prepared is not None and not self.created:
             # 还没开始首次上锁：恢复原样（文件夹里全是明文，删掉 .vault 即可）
@@ -456,7 +395,7 @@ class CreateWizard(QWizard):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.worker is not None and self.worker.isRunning():
-            QMessageBox.information(self, "正在首次上锁", "加密正在进行，不能关闭。断电也不会丢数据，请等它完成。")
+            self._busy_box()
             event.ignore()
             return
         super().closeEvent(event)

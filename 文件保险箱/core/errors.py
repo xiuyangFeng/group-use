@@ -33,6 +33,10 @@ class RecoveryNeededError(VaultStateError):
         super().__init__(f"上次操作没有完成（状态 {state}），需要先恢复")
 
 
+class InUseError(VaultStateError):
+    """外部程序（如 CT 脱敏工具）正在使用保险箱里的文件，现在不能上锁。"""
+
+
 class IntegrityError(VaultError):
     """数据完整性校验失败 / 文件缺失。"""
 

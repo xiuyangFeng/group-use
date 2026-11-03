@@ -158,7 +158,7 @@ def main() -> int:
         win._refresh()
         assert win.cards[0].info["state"] == C.UNLOCKED
         win.cards[0].update_countdown(146)
-        assert win.cards[0].countdown.text().endswith("12:34"), win.cards[0].countdown.text()
+        assert win.cards[0].countdown.text().startswith("12:34"), win.cards[0].countdown.text()
 
     check("保险箱卡片状态 / 倒计时", _cards)
 
@@ -221,6 +221,47 @@ def main() -> int:
             w.close()
 
     check("空闲 5 分钟触发自动上锁", _auto_lock)
+
+    def _auto_lock_skips_in_use():
+        import json
+        import time as _time
+
+        target = tmp / "脱敏中的数据"
+        make_vault(target, cfg)
+        s = AppStore(cfg / "store5b")
+        s.set_auto_lock(5)
+        key = s.add_vault(target)["path"]  # 和真实程序一样，会话用列表里规范化后的路径
+        w = mw.MainWindow(s)
+        v = Vault(target, audit_dir=cfg)
+        v.unlock(PASSWORD)
+        w.sessions[key] = v
+        marker = target / C.VAULT_DIRNAME / "in-use-ct-deid.json"
+        info = {"tool": "CT 数据脱敏工具", "active": True, "heartbeat": _time.time(), "what": "原始数据"}
+        marker.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+        calls: list = []
+        old_idle = mw.idle_seconds
+        old_run = w._run_lock
+        mw.idle_seconds = lambda: 301
+        w._run_lock = lambda vault, **kw: calls.append(kw)
+        try:
+            w._refresh()
+            w._on_tick()
+            assert calls == [], f"脱敏工具在用时不应自动上锁：{calls}"
+            card = next(c for c in w.cards if c.info["path"] == key)
+            assert "正在使用" in card.countdown.text(), card.countdown.text()
+            # 脱敏结束（标记改成 active=false）：人还没回来，下一次定时就该锁
+            marker.write_text(json.dumps({**info, "active": False}, ensure_ascii=False), encoding="utf-8")
+            w._on_tick()
+            assert len(calls) == 1 and calls[0].get("auto") is True, calls
+        finally:
+            mw.idle_seconds = old_idle
+            w._run_lock = old_run
+            v.close()
+            w.sessions.clear()
+            w._quitting = True
+            w.close()
+
+    check("脱敏工具在用时不自动上锁，用完后照常自动上锁", _auto_lock_skips_in_use)
 
     _say("== 窗口 / 弹窗 ==")
 
@@ -323,7 +364,7 @@ def main() -> int:
         wiz.page_password.pw2.setText("short")
         pump()
         assert not wiz.page_password.isComplete()
-        assert "至少 8 位" in wiz.page_password.rules.text()
+        assert "8 位以上" in wiz.page_password.rules.text() and "○" in wiz.page_password.rules.text()
         assert "还没满足" in wiz.page_password.hint.text()
         wiz.page_password.pw1.setText(PASSWORD)
         wiz.page_password.pw2.setText(PASSWORD)
@@ -481,6 +522,180 @@ def main() -> int:
         w.close()
 
     check("上次没上锁的提醒（状态栏 + 卡片）", _leftover_warning)
+
+    _say("== 新增流程 ==")
+    from gui import dialogs as dl
+    from gui.wizard import folder_problem
+
+    def _patch(obj, name, value, saved):
+        saved.append((obj, name, getattr(obj, name)))
+        setattr(obj, name, value)
+
+    def _restore(saved):
+        for obj, name, value in reversed(saved):
+            setattr(obj, name, value)
+
+    def _wrong_password_retry():
+        target = tmp / "输错密码"
+        make_tree(target)
+        make_vault(target, cfg)
+        s = AppStore(cfg / "store10")
+        s.add_vault(target)
+        w = mw.MainWindow(s)
+        answers = iter(["Wrong-pass-1", PASSWORD])
+        seen_errors: list = []
+        saved: list = []
+
+        def fake_ask(parent, path, *, action="unlock", error="", note=""):
+            seen_errors.append(error)
+            return next(answers), False
+
+        _patch(mw.PasswordDialog, "ask", staticmethod(fake_ask), saved)
+        _patch(mw.QDesktopServices, "openUrl", staticmethod(lambda *_a: True), saved)
+        try:
+            w.unlock_vault(str(target.resolve()))
+            assert seen_errors == ["", "密码不对，再试一次"], seen_errors
+            assert Vault(target).status()["state"] == C.UNLOCKED
+            assert str(target.resolve()) in w.sessions
+            # 上锁不需要再输密码
+            w.lock_vault(str(target.resolve()))
+            assert Vault(target).status()["state"] == C.LOCKED
+            assert not w.sessions
+        finally:
+            _restore(saved)
+            w._quitting = True
+            w.close()
+
+    check("输错密码：不弹报错框，直接重输", _wrong_password_retry)
+
+    def _password_management():
+        target = tmp / "密码管理"
+        make_tree(target)
+        v = Vault(target, audit_dir=cfg)
+        created = v.create(PASSWORD)
+        v.close()
+        rec_key = created["recovery_key"]
+        from core.crypto import recovery_key_parse
+
+        s = AppStore(cfg / "store11")
+        s.add_vault(target)
+        w = mw.MainWindow(s)
+        path = str(target.resolve())
+        saved: list = []
+        try:
+            # 1) 修改密码：先输错原密码，再输对
+            change_answers = iter([("Wrong-Old-1", "NewPass2026a"), (PASSWORD, "NewPass2026a")])
+            change_errors: list = []
+
+            def fake_change(parent, p, *, error=""):
+                change_errors.append(error)
+                return next(change_answers)
+
+            _patch(mw.ChangePasswordDialog, "ask", staticmethod(fake_change), saved)
+            w.change_password(path)
+            assert change_errors == ["", "原密码不对"], change_errors
+            v = Vault(target, audit_dir=cfg)
+            v.verify(password="NewPass2026a")
+            v.close()
+
+            # 2) 忘记密码：用恢复密钥重置
+            reset_answers = iter([(recovery_key_parse(rec_key), "Reset2026Pass")])
+            _patch(mw.ResetPasswordDialog, "ask", staticmethod(lambda parent, p, *, error="": next(reset_answers)), saved)
+            assert w.reset_password(path) == "Reset2026Pass"
+            v = Vault(target, audit_dir=cfg)
+            v.verify(password="Reset2026Pass")
+            v.close()
+
+            # 3) 换新恢复密钥：展示新密钥的对话框必须勾选才能关
+            shown: list = []
+            _patch(mw.PasswordDialog, "ask", staticmethod(lambda parent, p, **kw: ("Reset2026Pass", False)), saved)
+
+            class FakeKeyDialog:
+                def __init__(self, parent, key, fp):
+                    shown.append(key)
+
+                def exec(self):
+                    return 1
+
+            _patch(mw, "NewRecoveryKeyDialog", FakeKeyDialog, saved)
+            w.regenerate_recovery(path)
+            assert len(shown) == 1 and shown[0] != rec_key
+            v = Vault(target, audit_dir=cfg)
+            v.verify(recovery_key=recovery_key_parse(shown[0]))
+            v.close()
+
+            real = dl.NewRecoveryKeyDialog(None, shown[0], "fp")
+            real.show()
+            assert not real.ok.isEnabled()
+            real.reject()
+            assert real.isVisible(), "没勾选「已抄好」就被关掉了"
+            real.check.setChecked(True)
+            assert real.ok.isEnabled()
+            real.accept()
+
+            events = [r.get("event") for r in AuditLog(s.audit_path).records()]
+            for ev in ("CHANGE_PASSWORD", "RESET_BY_RECOVERY", "REGENERATE_RECOVERY"):
+                assert ev in events, (ev, events[-10:])
+            assert dl._event_name("RESET_BY_RECOVERY") == "重置密码"
+        finally:
+            _restore(saved)
+            w._quitting = True
+            w.close()
+
+    check("修改密码 / 忘记密码重置 / 换恢复密钥", _password_management)
+
+    def _add_existing_and_skip():
+        existing = tmp / "别人建的保险箱"
+        make_tree(existing)
+        make_vault(existing, cfg)
+        s = AppStore(cfg / "store12")
+        w = mw.MainWindow(s)
+        try:
+            assert w.empty.isVisibleTo(w) or not s.vaults
+            w.new_vault(str(existing))  # 已是保险箱：直接加进列表，不开向导
+            assert [Path(p).name for p in s.vault_paths()] == ["别人建的保险箱"]
+            w.new_vault(str(existing))  # 再拖一次：不重复
+            assert len(s.vault_paths()) == 1
+        finally:
+            w._quitting = True
+            w.close()
+
+        plain = tmp / "新文件夹-跳过第一步"
+        make_tree(plain)
+        assert folder_problem(plain) is None
+        assert folder_problem(existing) == "这个文件夹已经是保险箱"
+        assert folder_problem(Path.home()) is not None
+        wiz = CreateWizard(None, AppStore(cfg / "store13"), initial_path=str(plain))
+        wiz.show()
+        pump()
+        assert wiz.currentId() == wiz.PAGE_PASSWORD, wiz.currentId()
+        assert "新文件夹-跳过第一步" in wiz.page_password.folder_label.text()
+        wiz.reject()
+
+    check("拖入已有保险箱直接添加 / 选好文件夹直接设密码", _add_existing_and_skip)
+
+    def _lock_fail_keeps_session():
+        target = tmp / "上锁失败"
+        make_tree(target)
+        make_vault(target, cfg)
+        s = AppStore(cfg / "store14")
+        s.add_vault(target)
+        w = mw.MainWindow(s)
+        path = str(target.resolve())
+        v = Vault(target, audit_dir=cfg)
+        v.unlock(PASSWORD)
+        w.sessions[path] = v
+        try:
+            w._finish_lock(path, v, "failed")  # 例如文件还开着：状态仍是已解锁
+            assert w.sessions.get(path) is v, "上锁失败后不该丢掉内存里的密钥"
+            w.lock_all()
+            assert Vault(target).status()["state"] == C.LOCKED
+            assert not w.sessions
+        finally:
+            w._quitting = True
+            w.close()
+
+    check("上锁失败保留密钥，之后「全部上锁」不用再输密码", _lock_fail_keeps_session)
 
 
     _say("")

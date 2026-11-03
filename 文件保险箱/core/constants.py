@@ -28,6 +28,11 @@ MARKER_TEXT = """这个文件夹已经用「文件保险箱」上锁。
 如果你不是这个文件夹的主人，请联系它的主人，不要尝试删除或移动里面的东西。
 """
 
+# 外部程序"正在使用"标记（见 core/inuse.py）：在 .vault 里，不加密
+INUSE_GLOB = "in-use-*.json"
+INUSE_STALE_SECONDS = 180      # 超过 3 分钟没刷新心跳，视为外部程序已不在
+INUSE_CLOCK_SKEW_SECONDS = 60
+
 # 临时文件后缀（扫描时跳过）
 TMP_SUFFIXES = (".fdv-part", ".fdv-tmp")
 

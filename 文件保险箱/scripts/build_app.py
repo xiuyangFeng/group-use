@@ -7,7 +7,7 @@
 
 产物（dist/）：
     文件保险箱.app                                macOS 应用（双击即用）
-    文件保险箱-0.3.1-macOS-arm64.zip               给同事的压缩包
+    文件保险箱-<版本>-macOS-arm64.zip             给同事的压缩包
     文件保险箱/SHA256SUMS.txt
 
 Windows 上运行会生成 dist/文件保险箱/ 文件夹版，打成 -Windows-x64.zip。

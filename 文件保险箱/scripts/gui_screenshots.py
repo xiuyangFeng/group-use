@@ -26,7 +26,7 @@ from PySide6.QtWidgets import QApplication, QMenu  # noqa: E402
 from core.vault import Vault  # noqa: E402
 from tests.conftest import PASSWORD, make_tree  # noqa: E402
 
-OUT = PROJECT / "docs" / "images" / "gui"
+OUT = Path(os.environ.get("FDVAULT_SHOTS_OUT") or (PROJECT / "docs" / "images" / "gui"))
 TMP = Path(tempfile.mkdtemp(prefix="fdvault-shots-"))
 
 
@@ -75,7 +75,10 @@ def main() -> int:
     from gui import main_window as mw
     from gui.dialogs import (
         AuditWindow,
+        ChangePasswordDialog,
+        NewRecoveryKeyDialog,
         PasswordDialog,
+        ResetPasswordDialog,
         ProgressDialog,
         RecoveryDialog,
         SettingsDialog,
@@ -94,6 +97,12 @@ def main() -> int:
     make_vault(v1, cfg)
     make_vault(v2, cfg)
 
+    # 空列表（第一次打开）
+    empty_win = mw.MainWindow(AppStore(cfg / "empty"))
+    shot(empty_win, "00b-main-empty.png", resize=(760, 560))
+    empty_win._quitting = True
+    empty_win.close()
+
     store = AppStore(cfg)
     store.add_vault(v1)
     store.add_vault(v2)
@@ -102,7 +111,7 @@ def main() -> int:
     mw.idle_seconds = lambda: 754  # 12:34
 
     win = mw.MainWindow(store)
-    shot(win, "01-main-locked.png", resize=(920, 660))
+    shot(win, "01-main-locked.png", resize=(760, 560))
 
     # 解锁一个，展示「已解锁」卡片和倒计时（放进 sessions，模拟是通过界面解锁的）
     vault2 = Vault(v2, audit_dir=cfg)
@@ -134,7 +143,7 @@ def main() -> int:
     app.processEvents()
     wiz.page_folder.path_edit.setText(str(target))
     app.processEvents()
-    shot(wiz, "02-wizard-folder.png", resize=(680, 540))
+    shot(wiz, "02-wizard-folder.png", resize=(520, 500))
 
     wiz.next()
     app.processEvents()
@@ -164,6 +173,35 @@ def main() -> int:
     shot(dlg, "06-unlock.png")
     dlg.reject()
 
+    dlg = PasswordDialog(win, str(v1), error="密码不对，再试一次")
+    dlg.input.setText("demo-password-123")
+    shot(dlg, "06b-unlock-wrong.png")
+    dlg.reject()
+
+    reset = ResetPasswordDialog(win, str(v1))
+    reset.key_input.setText("ZHD6-6KW4-Q2MN-8XRT-4HPA-J7CE-WB3F-9LKD")
+    reset.pair.pw1.setText(PASSWORD)
+    reset.pair.pw2.setText(PASSWORD)
+    shot(reset, "14-reset-password.png")
+    reset.reject()
+
+    change = ChangePasswordDialog(win, str(v1))
+    change.old.setText("old-password")
+    change.pair.pw1.setText("Short1")
+    shot(change, "15-change-password.png")
+    change.reject()
+
+    newkey = NewRecoveryKeyDialog(win, "ZHD6-6KW4-Q2MN-8XRT-4HPA-J7CE-WB3F-9LKD", "a1b2c3d4")
+    shot(newkey, "16-new-recovery-key.png")
+    newkey.check.setChecked(True)
+    newkey.accept()
+
+    card_menu = win.cards[0]._build_menu()
+    card_menu.popup(QPoint(300, 300))
+    app.processEvents()
+    shot(card_menu, "10-card-menu.png")
+    card_menu.close()
+
     rec = RecoveryDialog(win, str(v1), "待恢复（上锁中断）")
     shot(rec, "12-recover.png")
     rec.reject()
@@ -178,12 +216,7 @@ def main() -> int:
     print(f"  · 审计记录数：{audit.table.rowCount()}")
 
     control = OperationControl()
-    prog = ProgressDialog(
-        win,
-        "正在上锁",
-        "「组会材料」正在重新加密。完成后文件夹里只剩加密数据。",
-        control=control,
-    )
+    prog = ProgressDialog(win, "正在上锁「组会材料」", control=control)
     prog._on_progress(
         {
             "done_files": 1400,
@@ -198,7 +231,7 @@ def main() -> int:
 
     # 托盘菜单（macOS 菜单栏的右键菜单内容）
     menu = QMenu()
-    for text in ("打开主窗口", "立即上锁全部", None, "审计日志", "设置", None, "退出"):
+    for text in ("打开主窗口", "全部上锁", None, "日志", "设置", None, "退出"):
         if text is None:
             menu.addSeparator()
         else:

@@ -23,12 +23,13 @@ from typing import Callable, Iterable
 from cryptography.exceptions import InvalidTag
 
 from . import constants as C
-from . import crypto, fsutil, passwords, transform
+from . import crypto, fsutil, inuse, passwords, transform
 from .audit import AuditLog
 from .control import OperationControl
 from .errors import (
     AlreadyVaultError,
     DiskSpaceError,
+    InUseError,
     IntegrityError,
     NotAVaultError,
     PasswordError,
@@ -285,6 +286,7 @@ class Vault:
             "total_bytes": h.total_bytes,
             "recovery_fingerprint": h.recovery_fingerprint,
             "needs_recovery": h.state in (C.LOCKING, C.UNLOCKING, C.INCONSISTENT),
+            "in_use_by": inuse.describe(inuse.active_users(self.root)),
         }
 
     # ================================================================ 创建
@@ -393,6 +395,7 @@ class Vault:
         if h.state != C.UNLOCKED:
             raise VaultStateError(f"当前状态不能上锁：{h.state}")
 
+        self._precheck_in_use()
         self._open_key(password=password)
         self._precheck_busy()
         self._open_session()
@@ -405,6 +408,21 @@ class Vault:
             return stats
         finally:
             self._close_session()
+
+    def _precheck_in_use(self) -> None:
+        """上锁前看有没有外部程序（如 CT 脱敏工具）声明正在用这个保险箱里的文件。
+
+        脱敏这类长任务只在读写的一瞬间打开文件，_precheck_busy 查不到；中途上锁会让
+        它读不到原始数据、或把映射表重新以明文写回已上锁的文件夹，所以单独拦住。"""
+        users = inuse.active_users(self.root)
+        if not users:
+            return
+        raise InUseError(
+            f"{inuse.describe(users)}正在使用这个保险箱里的文件，现在不能上锁。\n"
+            "请等它处理完（或在那边点「停止」）再上锁。"
+            f"如果那个程序已经关掉了，{C.INUSE_STALE_SECONDS // 60} 分钟后标记会自动失效。\n"
+            "保险箱没有改动，文件还是原样。"
+        )
 
     def _precheck_busy(self) -> None:
         """上锁前检查文件是否正被其它程序占用（Windows 共享冲突 / macOS lsof）。"""
