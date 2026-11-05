@@ -148,3 +148,23 @@ def test_release_tree_allows_cleanup(locked_vault, tmp_path):
     protect.release_tree(tmp_path)
     shutil.rmtree(root)
     assert not root.exists()
+
+
+@pytest.mark.skipif(not protect.IS_WINDOWS, reason="Windows 父目录规则")
+def test_windows_parent_rule_keeps_siblings_usable_and_is_removed(locked_vault, audit_dir, tmp_path):
+    root, _, _ = locked_vault
+    assert protect._win_everyone_denies(tmp_path), "父目录应该加上「拒绝删除子项」"
+    # 同一个父目录下的别的文件 / 文件夹照常能删、能改名
+    other = tmp_path / "别的文件.txt"
+    other.write_text("x", encoding="utf-8")
+    os.unlink(other)
+    folder = tmp_path / "别的文件夹"
+    folder.mkdir()
+    os.rename(folder, tmp_path / "改了名")
+    os.rmdir(tmp_path / "改了名")
+    # 解锁后父目录规则撤掉（父目录下没有别的上锁保险箱了）
+    v = Vault(root, audit_dir=audit_dir)
+    v.unlock(PASSWORD)
+    v.close()
+    assert protect._win_everyone_denies(tmp_path) == []
+    assert protect._win_everyone_denies(root) == []

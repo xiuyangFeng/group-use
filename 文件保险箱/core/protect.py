@@ -9,8 +9,13 @@ macOS
     2. 目录再加 ACL「everyone deny delete,delete_child」：就算有人在访达里点了「仍要移到
        废纸篓」（访达会先去掉锁定标记），还是要输管理员密码才删得掉。
 Windows
-    根目录加一条可继承的拒绝规则：Everyone 不能「删除」(DE) / 「删除子文件夹及文件」(DC)。
-    资源管理器里移动、删除会提示「需要权限」；继承到 .vault 里每个文件，不会删一半。
+    1. 根目录加一条可继承的拒绝规则：Everyone 不能「删除」(DE) / 「删除子文件夹及文件」(DC)，
+       继承到 .vault 里每个文件：里面的东西一个都删不掉、不会删一半；
+    2. 父目录（如桌面）加一条只作用于它自己的「拒绝删除子项」(DC)。NTFS 的规则是：父目录给了
+       「删除子项」权限，子文件夹自己拒绝删除也没用，照样能被移动 / 改名 / 扔进回收站。
+       这条只去掉「靠父目录删」这条路：桌面上其它文件本身继承了删除权限，照常能删、能挪。
+       父目录下没有别的上锁保险箱时，撤保护会把它一起撤掉；父目录本来就有 Everyone 的拒绝规则、
+       或者没权限改（如 D 盘根目录），就不碰父目录，只做第 1 步（这时文件夹整体还能被挪走）。
 
 本程序自己做解锁 / 改密码 / 校验等操作时，先撤掉保护（文件的主人有权改这些属性），
 操作结束如果还是「已上锁」再加回去，见 core/vault.py 的 @locked。
@@ -38,6 +43,7 @@ MAC_ACL = "everyone deny delete,delete_child"
 # Windows：Everyone 的 SID，用 SID 避免中文系统里组名不是 "Everyone"
 WIN_EVERYONE = "*S-1-1-0"
 WIN_DENY = f"{WIN_EVERYONE}:(OI)(CI)(DE,DC)"
+WIN_PARENT_DENY = f"{WIN_EVERYONE}:(DC)"   # 只作用于父目录本身，不继承
 
 UF_IMMUTABLE = getattr(stat, "UF_IMMUTABLE", 0x2)
 
@@ -111,18 +117,67 @@ def is_protected(root: str | os.PathLike) -> bool:
     if IS_MAC:
         return _is_immutable(root) and _is_immutable(root / C.VAULT_DIRNAME)
     if IS_WINDOWS:
-        try:
-            out = subprocess.run(
-                ["icacls", str(root)],
-                capture_output=True,
-                text=True,
-                check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            ).stdout
-        except OSError:
-            return False
-        return any("(DENY)" in line and ("S-1-1-0" in line or "Everyone" in line) for line in out.splitlines())
+        return bool(_win_everyone_denies(root))
     return False
+
+
+def _win_everyone_denies(p: Path) -> list[str]:
+    """icacls 输出里 Everyone 的拒绝规则（只看这个对象自己的，不含继承来的 (I)）。"""
+    try:
+        out = subprocess.run(
+            ["icacls", str(p)],
+            capture_output=True,
+            text=True,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout
+    except OSError:
+        return []
+    rules = []
+    for line in out.splitlines():
+        if "(DENY)" not in line or "(I)" in line:
+            continue
+        if "S-1-1-0" in line or "Everyone" in line:
+            rules.append(line.split(":", 1)[-1].strip() if ":" in line else line.strip())
+    return rules
+
+
+def _win_is_our_parent_rule(rules: list[str]) -> bool:
+    return bool(rules) and all(r.replace(" ", "").endswith("(DENY)(DC)") for r in rules)
+
+
+def _apply_windows(root: Path) -> bool:
+    ok = _run(["icacls", str(root), "/deny", WIN_DENY, "/C", "/Q"])
+    parent = root.parent
+    if ok and parent != root:
+        existing = _win_everyone_denies(parent)
+        if not existing:
+            _run(["icacls", str(parent), "/deny", WIN_PARENT_DENY, "/Q"])
+        # existing 是我们之前加的（同目录下另一个保险箱）就不用再加；是别人的规则就不碰
+    return ok
+
+
+def _win_locked_siblings(parent: Path, exclude: Path) -> bool:
+    """父目录下还有没有别的（受保护的）保险箱。"""
+    try:
+        children = list(parent.iterdir())
+    except OSError:
+        return False
+    for child in children:
+        if child == exclude or not (child / C.VAULT_DIRNAME / C.HEADER_NAME).exists():
+            continue
+        if _win_everyone_denies(child):
+            return True
+    return False
+
+
+def _release_windows(root: Path) -> None:
+    _run(["icacls", str(root), "/remove:d", WIN_EVERYONE, "/C", "/Q"])
+    parent = root.parent
+    if parent == root:
+        return
+    if _win_is_our_parent_rule(_win_everyone_denies(parent)) and not _win_locked_siblings(parent, root):
+        _run(["icacls", str(parent), "/remove:d", WIN_EVERYONE, "/Q"])
 
 
 def apply(root: str | os.PathLike) -> bool:
@@ -133,7 +188,7 @@ def apply(root: str | os.PathLike) -> bool:
     if IS_MAC:
         return _apply_mac(root)
     if IS_WINDOWS:
-        return _run(["icacls", str(root), "/deny", WIN_DENY, "/C", "/Q"])
+        return _apply_windows(root)
     return False
 
 
@@ -145,7 +200,7 @@ def release(root: str | os.PathLike) -> None:
     if IS_MAC:
         _release_mac(root)
     elif IS_WINDOWS:
-        _run(["icacls", str(root), "/remove:d", WIN_EVERYONE, "/C", "/Q"])
+        _release_windows(root)
 
 
 def _apply_mac(root: Path) -> bool:
@@ -219,15 +274,24 @@ def probe(root: str | os.PathLike, elsewhere: str | os.PathLike) -> list[str]:
     import shutil
 
     root = Path(root)
-    attempts = {
-        "移动文件夹": lambda: os.rename(root, Path(elsewhere) / (root.name + "-moved")),
-        "改名文件夹": lambda: os.rename(root, root.with_name(root.name + "-renamed")),
-        "删除说明文件": lambda: os.unlink(root / C.MARKER_NAME),
-        "删除 header": lambda: os.unlink(root / C.VAULT_DIRNAME / C.HEADER_NAME),
-        "删除整个 .vault": lambda: shutil.rmtree(root / C.VAULT_DIRNAME),
-    }
     leaked = []
-    for name, fn in attempts.items():
+    # 移动 / 改名：万一成功了马上挪回来，后面几项才测得准
+    for name, dest in (
+        ("移动文件夹", Path(elsewhere) / (root.name + "-moved")),
+        ("改名文件夹", root.with_name(root.name + "-renamed")),
+    ):
+        try:
+            os.rename(root, dest)
+        except OSError:
+            continue
+        leaked.append(name)
+        os.rename(dest, root)
+    # 删除：被拦住会抛 OSError；成功了就是真删了（自检只在临时保险箱上跑）
+    for name, fn in (
+        ("删除说明文件", lambda: os.unlink(root / C.MARKER_NAME)),
+        ("删除 header", lambda: os.unlink(root / C.VAULT_DIRNAME / C.HEADER_NAME)),
+        ("删除整个 .vault", lambda: shutil.rmtree(root / C.VAULT_DIRNAME)),
+    ):
         try:
             fn()
         except OSError:
