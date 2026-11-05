@@ -6,6 +6,7 @@ import pytest
 
 from core import constants as C, crypto
 from core.errors import PasswordError, RecoveryKeyError
+from core import protect
 from core.vault import Vault
 from tests.conftest import PASSWORD, make_tree
 
@@ -98,6 +99,7 @@ def test_change_password_blocked_when_unlock_incomplete(tmp_path, audit_dir):
     from core.header import load_header, save_header
     from core.errors import RecoveryNeededError
 
+    protect.release(root)  # 模拟绕过保护手工改 header
     h = load_header(root / ".vault" / "header.json")
     h.set_state(C.UNLOCKING)
     save_header(root / ".vault" / "header.json", h)

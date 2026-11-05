@@ -254,6 +254,10 @@ def cmd_status(args) -> int:
     print(f"创建：  {st['created_at']}")
     print(f"内容：  {st['file_count']} 个文件 / {fsutil.human_bytes(st['total_bytes'])}")
     print(f"恢复密钥指纹：{st['recovery_fingerprint']}")
+    if st["state"] == "LOCKED":
+        if not st["protected"]:
+            st["protected"] = vault.ensure_protected()
+        print(f"防移动/删除：{'已开启' if st['protected'] else '未开启（这个磁盘不支持，或已用 FDVAULT_NO_PROTECT=1 关闭）'}")
     print(f"审计日志：{vault._audit_dir / 'audit.jsonl'}")
     if st["in_use_by"]:
         print(f"正在使用：{st['in_use_by']}（用完之前不能上锁）")

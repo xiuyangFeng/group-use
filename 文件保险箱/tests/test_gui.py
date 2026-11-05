@@ -131,7 +131,7 @@ def test_gui_version_flag():
         cwd=str(PROJECT),
     )
     assert proc.returncode == 0, proc.stderr
-    assert "文件保险箱 0.4.0" in proc.stdout, proc.stdout
+    assert "文件保险箱 0.5.1" in proc.stdout, proc.stdout
 
 
 def test_store_config_roundtrip(tmp_path):

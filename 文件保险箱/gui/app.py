@@ -64,6 +64,27 @@ class FolderOpenFilter(QObject):
         return False
 
 
+class QuitGuard(QObject):
+    """系统发来的退出请求先走「退出前上锁」。
+
+    这些退法都不经过托盘菜单的「退出」，以前直接退出、不上锁，保险箱一直开着：
+    - macOS 的 ⌘Q、Dock 右键「退出」、注销、关机：系统调 NSApp terminate:，Qt 先给程序对象发
+      QEvent.Close 问「能不能退」，同意后系统直接结束进程（不再回到事件循环）；
+    - QApplication.quit() / Windows 注销关机：给程序对象发 QEvent.Quit。
+    这里两种都拦下来：先上锁；锁不上、用户选「取消 / 留在后台」就拒绝这次退出。"""
+
+    def __init__(self, window) -> None:
+        super().__init__(window)
+        self._window = window
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        if event.type() in (QEvent.Close, QEvent.Quit) and obj is QApplication.instance():
+            if not self._window.prepare_quit():
+                event.ignore()  # 默认是 accepted；必须 ignore，系统才知道退出被拒绝
+                return True
+        return False
+
+
 def option_value(args: list[str], name: str) -> str | None:
     """取 --name value 或 --name=value；没有就返回 None。"""
     for i, a in enumerate(args):
@@ -184,6 +205,12 @@ def main(argv: list[str] | None = None) -> int:
     folder_filter = FolderOpenFilter(window)
     app.installEventFilter(folder_filter)
     window._folder_filter = folder_filter  # 保持引用，防止被回收
+
+    # ⌘Q / Dock 退出 / 注销 / 关机：先上锁再退出
+    quit_guard = QuitGuard(window)
+    app.installEventFilter(quit_guard)
+    window._quit_guard = quit_guard
+    app.commitDataRequest.connect(window.commit_data)
     return app.exec()
 
 

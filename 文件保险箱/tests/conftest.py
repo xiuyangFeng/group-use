@@ -19,6 +19,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 PASSWORD = "Test-Password-1234"
 
+# 测试（含它启动的子进程脚本）的审计日志 / 设置一律写到临时目录，不碰真实的
+# ~/Library/Application Support/文件保险箱（以前测试会往真实审计日志里写「创建保险箱」记录）
+import tempfile  # noqa: E402
+
+os.environ.setdefault("FDVAULT_DATA_DIR", tempfile.mkdtemp(prefix="fdvault-test-data-"))
+
 
 # ---------------------------------------------------------------- 环境
 
@@ -32,6 +38,15 @@ def fast_env(monkeypatch):
     crash.reset_for_tests()
     yield
     crash.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def release_protection(tmp_path):
+    """上锁的保险箱带防删除保护；测试结束撤掉，pytest 才能清理临时目录。"""
+    yield
+    from core import protect
+
+    protect.release_tree(tmp_path)
 
 
 @pytest.fixture

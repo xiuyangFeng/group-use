@@ -101,3 +101,25 @@ def test_windows_build_script():
     assert "requirements.txt" in text and "requirements-dev.txt" in text
     assert "SHA256SUMS.txt" in text
     assert "$SkipSmoke" in text and "$NoClean" in text
+
+
+def test_powershell_scripts_have_utf8_bom():
+    """Windows 自带的 PowerShell 5.1 把没有 BOM 的脚本当成系统 ANSI（中文系统是 GBK）读，
+    脚本里的中文（包括「文件保险箱.exe」）会变乱码甚至语法错误。必须带 UTF-8 BOM。"""
+    scripts = list(WIN.glob("*.ps1")) + list((PROJECT / "scripts").glob("*.ps1"))
+    assert scripts
+    for script in scripts:
+        assert script.read_bytes().startswith(b"\xef\xbb\xbf"), f"{script.name} 缺 UTF-8 BOM"
+
+
+def test_windows_zip_extras_exist():
+    """Windows 压缩包里和程序放在一起的说明 / 脚本都要存在（见 scripts/build_app.py）。"""
+    import sys
+
+    sys.path.insert(0, str(PROJECT / "scripts"))
+    import build_app
+
+    for name in build_app.WINDOWS_EXTRAS:
+        assert (WIN / name).is_file(), name
+    text = build_app.windows_readme("9.9.9")
+    assert "不需要安装 Python" in text and "文件保险箱.exe" in text

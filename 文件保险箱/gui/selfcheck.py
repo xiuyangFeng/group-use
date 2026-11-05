@@ -126,6 +126,17 @@ def run(report_path: str | None = None) -> int:
 
     _check("创建→解锁→上锁，文件字节一致", _roundtrip)
 
+    def _protected():
+        from core import protect
+
+        if not protect.enabled():
+            return
+        assert Vault(root).status()["protected"], "上锁后没有加上防移动/删除保护"
+        leaked = protect.probe(root, tmp)
+        assert not leaked, f"上锁后这些操作没被拦住：{leaked}"
+
+    _check("上锁后不能移动 / 删除", _protected)
+
     def _state_machine():
         v = Vault(root, audit_dir=cfg)
         try:
@@ -178,6 +189,9 @@ def run(report_path: str | None = None) -> int:
 
     _check("图标能绘制", _icons)
 
+    from core import protect
+
+    protect.release_tree(tmp)  # 撤掉保护，临时目录才能被系统清理
     _say("")
     if _failed:
         _say(f"SELFCHECK FAIL：{_ok} 通过，{len(_failed)} 失败 -> {_failed}")

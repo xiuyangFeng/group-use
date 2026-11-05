@@ -23,7 +23,7 @@ from typing import Callable, Iterable
 from cryptography.exceptions import InvalidTag
 
 from . import constants as C
-from . import crypto, fsutil, inuse, passwords, transform
+from . import crypto, fsutil, inuse, passwords, protect, transform
 from .audit import AuditLog
 from .control import OperationControl
 from .errors import (
@@ -50,14 +50,21 @@ IN_PROGRESS = (C.LOCKING, C.UNLOCKING, C.INCONSISTENT)
 
 
 def locked(method):
-    """给修改类操作加跨进程互斥锁，并在进入时重新读取 header。"""
+    """给修改类操作加跨进程互斥锁，并在进入时重新读取 header。
+
+    上锁状态的保险箱有防移动 / 防删除保护（core/protect.py），拿到互斥锁后先撤掉，
+    操作结束时如果还是「已上锁」再加回去（不管操作成功还是失败、密码对不对）。"""
 
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
         self._acquire()
         try:
             self._header = None  # 重新读，避免缓存过期
-            return method(self, *args, **kwargs)
+            protect.release(self.root)
+            try:
+                return method(self, *args, **kwargs)
+            finally:
+                self._reprotect()
         finally:
             self._release()
 
@@ -97,6 +104,36 @@ class Vault:
     def _release(self) -> None:
         if self._flock is not None:
             self._flock.release()
+
+    # ================================================================ 防移动 / 防删除
+
+    def _reprotect(self) -> None:
+        """处于「已上锁」就加保护；其它状态（解锁着、中断待恢复）保持可改。"""
+        try:
+            h = load_header(self.header_path) if self.header_path.exists() else None
+        except Exception:
+            return
+        if h is not None and h.state == C.LOCKED:
+            protect.apply(self.root)
+
+    def ensure_protected(self) -> bool:
+        """旧版本上锁的保险箱没有保护：补上。返回现在是否受保护。"""
+        if not protect.enabled() or not self.is_vault():
+            return False
+        if protect.is_protected(self.root):
+            return True
+        if self.header.state != C.LOCKED:
+            return False
+        try:
+            self._acquire()
+        except VaultError:
+            return False  # 另一个窗口正在操作，它结束时会自己加上
+        try:
+            self._header = None
+            self._reprotect()
+        finally:
+            self._release()
+        return protect.is_protected(self.root)
 
     # ================================================================ 基础
 
@@ -286,6 +323,7 @@ class Vault:
             "total_bytes": h.total_bytes,
             "recovery_fingerprint": h.recovery_fingerprint,
             "needs_recovery": h.state in (C.LOCKING, C.UNLOCKING, C.INCONSISTENT),
+            "protected": protect.is_protected(self.root),
             "in_use_by": inuse.describe(inuse.active_users(self.root)),
         }
 

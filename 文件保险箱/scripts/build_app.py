@@ -230,6 +230,26 @@ def smoke_test(bundle: Path) -> None:
         log("运行时无网络检查通过：0 个 IP 连接/监听")
 
 
+WINDOWS_EXTRAS = ("安装说明.md", "安装右键菜单.ps1", "卸载右键菜单.ps1", "验收自检.ps1")
+
+
+def windows_readme(ver: str) -> str:
+    return f"""文件保险箱 {ver}（Windows 10/11 64 位）
+==========================================
+
+不需要安装 Python 或任何依赖：运行环境（Python、Qt 界面库、加密库）都已经打包在程序里。
+
+1. 把整个压缩包解压到固定位置，例如 D:\\工具\\（别直接在压缩包里双击运行）。
+2. 打开解压出来的「文件保险箱」文件夹，双击 文件保险箱.exe。
+   程序没有签名，第一次会弹「Windows 已保护你的电脑」：点「更多信息」→「仍要运行」。
+3. （推荐）右键 安装右键菜单.ps1 →「使用 PowerShell 运行」：以后右键文件夹就能直接上锁。
+4. （建议装完先跑）右键 验收自检.ps1 →「使用 PowerShell 运行」，结果写在 验收结果.txt。
+
+「文件保险箱\\_internal」是程序自带的运行环境，不要删、不要单独挪动。
+详细说明见 安装说明.md。
+"""
+
+
 def archive(bundle: Path) -> list[Path]:
     ver = version()
     machine = platform.machine().lower()
@@ -246,6 +266,11 @@ def archive(bundle: Path) -> list[Path]:
             for item in bundle.rglob("*"):
                 if item.is_file():
                     zf.write(item, item.relative_to(DIST))
+            # 解压即用：说明、右键菜单、验收自检和程序放在一起，不用另外拷
+            zf.writestr("先看我.txt", windows_readme(ver).encode("utf-8-sig"))
+            win = PROJECT / "installers" / "windows"
+            for name in WINDOWS_EXTRAS:
+                zf.write(win / name, name)
     log(f"压缩包：{out.name}（{out.stat().st_size / 1024 / 1024:.1f} MB）")
     made = [out]
 

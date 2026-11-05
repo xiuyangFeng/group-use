@@ -9,6 +9,7 @@ import struct
 import pytest
 
 from core import constants as C
+from core import protect
 from core.errors import IntegrityError, NotAVaultError
 from core.transform import HEADER as CHUNK_HEADER
 from core.vault import Vault
@@ -21,6 +22,8 @@ def locked_vault(tmp_path, audit_dir):
     v = Vault(root, audit_dir=audit_dir)
     v.create(PASSWORD)
     v.close()
+    # 上锁后有防删除/改写保护；这里模拟「有权限的人绕过保护硬改」，看能不能查出来
+    protect.release(root)
     return root
 
 
@@ -169,6 +172,7 @@ def test_missing_manifest_blocks_unlock_and_verify(tmp_path, audit_dir):
     v.create(PASSWORD)
     v.close()
 
+    protect.release(root)  # 模拟绕过防删除保护
     for p in (root / ".vault").glob("manifest.db*"):
         p.unlink()
 

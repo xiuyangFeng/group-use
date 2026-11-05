@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import logging
 import shutil
 import sys
 import time
@@ -270,9 +271,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.store = store
         self.sessions: dict[str, Vault] = {}
+        self._protect_tried: set[str] = set()
         self.cards: list[VaultCard] = []
         self._busy = False
         self._quitting = False
+        self._quit_in_progress = False
         self._auto_locking = False
         self._auto_lock_blocked = False  # 自动上锁失败后，等有人动了键盘鼠标再试，避免每秒弹一次
         self._last_disk_update = 0.0
@@ -420,7 +423,12 @@ class MainWindow(QMainWindow):
         if not Path(path).is_dir():
             return {"path": path, "state": "missing", "exists": False}
         try:
-            info = Vault(path).status()
+            vault = Vault(path)
+            info = vault.status()
+            if info["state"] == C.LOCKED and not info.get("protected") and path not in self._protect_tried:
+                # 旧版本上锁的保险箱没有防移动 / 防删除保护：补上（每个只试一次，U 盘等不支持的不反复试）
+                self._protect_tried.add(path)
+                info["protected"] = vault.ensure_protected()
             info["path"] = path
             info["exists"] = True
             return info
@@ -1020,22 +1028,50 @@ class MainWindow(QMainWindow):
             self.tray.show()
             self._notify("还在后台", "关掉占用文件的软件后，点图标 →「全部上锁」。")
 
-    def quit_app(self) -> None:
-        failed = self._lock_before_exit() if self.sessions else []
-        if failed:
-            choice = self._ask_quit_anyway(failed)
-            if choice == "cancel":
-                return
-            if choice == "background":
-                self._go_background()
-                return
+    def prepare_quit(self) -> bool:
+        """退出前把会话里的保险箱都锁回去。返回 True 表示可以退出（已标记 _quitting）。
+
+        托盘「退出」和系统发来的退出请求（⌘Q、Dock 右键退出、注销、关机，见 gui/app.py 的
+        QuitGuard）都走这里，保证不管怎么退都会先上锁。"""
+        if self._quitting:
+            return True
+        if self._quit_in_progress:
+            return False  # 正在上锁时又来一次退出请求：等这次走完
+        self._quit_in_progress = True
+        try:
+            failed = self._lock_before_exit() if self.sessions else []
+            if failed:
+                choice = self._ask_quit_anyway(failed)
+                if choice == "cancel":
+                    return False
+                if choice == "background":
+                    self._go_background()
+                    return False
+        finally:
+            self._quit_in_progress = False
         self._quitting = True
         for v in list(self.sessions.values()):
             v.close()
         self.sessions.clear()
         if self.tray is not None:
             self.tray.hide()
-        QApplication.quit()
+        return True
+
+    def quit_app(self) -> None:
+        if self.prepare_quit():
+            QApplication.quit()
+
+    def commit_data(self, manager) -> None:  # noqa: ANN001
+        """Windows 注销 / 关机（WM_QUERYENDSESSION）：先上锁；锁不上就请求取消关机。"""
+        if self._quitting or not self.sessions:
+            return
+        failed = self._lock_before_exit()
+        if failed:
+            logging.warning("注销/关机前有保险箱没锁上：%s", failed)
+            try:
+                manager.cancel()
+            except Exception:  # noqa: BLE001
+                pass
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._quitting:

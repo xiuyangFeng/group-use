@@ -1,4 +1,5 @@
 @echo off
+REM For developers only. Colleagues: use the Windows zip (no Python needed), unzip and run the exe.
 REM Run the file vault app directly from source (no exe needed). First run installs dependencies.
 REM Requires Python 3.12+ from python.org (tick "Add python.exe to PATH").
 cd /d "%~dp0"

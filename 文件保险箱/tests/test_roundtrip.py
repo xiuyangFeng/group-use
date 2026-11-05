@@ -9,6 +9,7 @@ import pytest
 
 from core import constants as C
 from core.errors import IntegrityError, PasswordError, VaultError
+from core import protect
 from core.vault import Vault
 from tests.conftest import PASSWORD, make_tree, snapshot, write_file
 
@@ -145,6 +146,7 @@ def test_verify_catches_missing_blob(tmp_path, audit_dir):
     make_tree(root)
     create_vault(root, audit_dir)
 
+    protect.release(root)  # 模拟绕过防删除保护
     blobs = sorted((root / ".vault" / "blobs").iterdir())
     os.unlink(blobs[0])
 
@@ -159,6 +161,7 @@ def test_unlock_refuses_when_blob_missing(tmp_path, audit_dir):
     root = tmp_path / "data"
     make_tree(root)
     create_vault(root, audit_dir)
+    protect.release(root)  # 模拟绕过防删除保护
     os.unlink(sorted((root / ".vault" / "blobs").iterdir())[0])
 
     v = open_vault(root, audit_dir)

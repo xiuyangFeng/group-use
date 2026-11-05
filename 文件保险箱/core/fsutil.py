@@ -291,7 +291,12 @@ def ensure_dir(path: str | os.PathLike, mode: int = 0o700) -> None:
 
 
 def platform_data_dir() -> Path:
-    """审计日志等状态的默认目录（不放进保险箱）。"""
+    """审计日志等状态的默认目录（不放进保险箱）。
+
+    FDVAULT_DATA_DIR 可以改到别处：测试和自检用它，免得往真实的审计日志 / 设置里写测试记录。"""
+    override = os.environ.get("FDVAULT_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
     home = Path.home()
     if sys.platform == "darwin":
         return home / "Library" / "Application Support" / "文件保险箱"

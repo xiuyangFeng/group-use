@@ -23,6 +23,8 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 faulthandler.enable()
 os.environ.setdefault("FDVAULT_KDF_FAST", "1")
+os.environ.setdefault("FDVAULT_NO_PROTECT", "1")  # 临时目录里的保险箱不加防删除保护，用完能直接删
+os.environ.setdefault("FDVAULT_DATA_DIR", __import__("tempfile").mkdtemp(prefix="gui-selftest-data-"))  # 不往真实审计日志里写
 os.environ.setdefault("FDVAULT_SKIP_BUSY_CHECK", "1")
 
 PROJECT = Path(__file__).resolve().parent.parent

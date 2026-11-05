@@ -24,6 +24,7 @@ def test_diagnostics_zip(tmp_path):
 
     out = tmp_path / "out"
     env = dict(os.environ)
+    env.pop("FDVAULT_DATA_DIR", None)  # 这个测试就是要看默认数据目录（由 HOME 决定）
     env.update(
         {
             "HOME": str(home),

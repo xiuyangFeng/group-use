@@ -29,6 +29,7 @@ sys.path.insert(0, str(PROJECT))
 from core.console import setup_utf8_stdio  # noqa: E402
 
 os.environ.setdefault("FDVAULT_KDF_FAST", "1")  # 彩排只验证流程，不测 Argon2 耗时
+os.environ.setdefault("FDVAULT_NO_PROTECT", "1")  # 临时目录里的保险箱不加防删除保护，用完能直接删
 
 PASSWORD = "Pilot-Password-1234"
 NEW_PASSWORD = "Pilot-Password-5678"

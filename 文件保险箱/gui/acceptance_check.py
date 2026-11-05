@@ -154,6 +154,18 @@ def run(report_path: str | None = None) -> int:
 
     _check("密文目录无明文/文件名/多余文件", _no_plaintext_residue)
 
+    def _protected():
+        from core import protect
+
+        if not protect.enabled():
+            return
+        assert Vault(root).status()["protected"], "上锁后没有加上防移动/删除保护"
+        leaked = protect.probe(root, tmp)
+        assert not leaked, f"上锁后这些操作没被拦住：{leaked}"
+        assert Vault(root).status()["state"] == C.LOCKED
+
+    _check("上锁后不能移动 / 改名 / 删除", _protected)
+
     def _recovery_key_unlock():
         key = recovery_key_parse(recovery_key_str[0])
         assert recovery_fingerprint(key) == Vault(root).header.recovery_fingerprint
@@ -185,6 +197,9 @@ def run(report_path: str | None = None) -> int:
 
     _check("权限位（POSIX）", _permissions)
 
+    from core import protect
+
+    protect.release_tree(tmp)  # 撤掉保护，临时目录才能被系统清理
     _say("")
     if _failed:
         _say(f"ACCEPTANCE FAIL：{_ok} 通过，{len(_failed)} 失败 -> {_failed}")

@@ -1,4 +1,4 @@
-# Windows 真机验收自检：双击右键"使用 PowerShell 运行"。
+﻿# Windows 真机验收自检：双击右键"使用 PowerShell 运行"。
 # 能自动验证的自动跑，不能自动的列出步骤；结果写到同目录 验收结果.txt。
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path

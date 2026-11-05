@@ -18,6 +18,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("FDVAULT_KDF_FAST", "1")
+os.environ.setdefault("FDVAULT_NO_PROTECT", "1")  # 临时目录里的保险箱不加防删除保护，用完能直接删
 os.environ.setdefault("FDVAULT_SKIP_BUSY_CHECK", "1")
 faulthandler.enable()
 
@@ -77,7 +78,56 @@ def main() -> int:
         traceback.print_exc()
         _say("EXITLOCK FAIL")
         return 1
-    _say("EXITLOCK PASS：退出前自动上锁，明文已清空")
+    # 第二种退法：系统发来的退出请求（macOS ⌘Q / Dock 退出 / 注销 / 关机先发 QEvent.Close，
+    # QApplication.quit() 和 Windows 注销关机发 QEvent.Quit），
+    # 窗口缩在托盘里（隐藏）——以前这条路不上锁就直接退了
+    try:
+        from PySide6.QtCore import QEvent
+
+        from gui.app import QuitGuard
+
+        root2 = tmp / "数据2"
+        make_tree(root2)
+        v2 = Vault(root2, audit_dir=tmp / "cfg")
+        v2.create(PASSWORD)
+        v2.close()
+        v2 = Vault(root2, audit_dir=tmp / "cfg")
+        v2.unlock(PASSWORD)
+        store2 = AppStore(tmp / "cfg" / "app2")
+        store2.add_vault(root2)
+        win2 = MainWindow(store2)
+        win2.sessions[str(root2)] = v2
+        win2.hide()
+        guard = QuitGuard(win2)
+        app.installEventFilter(guard)
+
+        # 锁不上、用户点「取消」：退出请求要被拒绝，保险箱保持原样
+        real_lock = win2._lock_before_exit
+        win2._lock_before_exit = lambda: ["数据2"]
+        win2._ask_quit_anyway = lambda failed: "cancel"
+        for kind in (QEvent.Close, QEvent.Quit):
+            ev = QEvent(kind)
+            QApplication.sendEvent(app, ev)
+            assert not ev.isAccepted(), f"锁不上又选了取消，退出请求（{kind}）应该被拒绝"
+        assert not win2._quitting and win2.sessions, "取消后不应该进入退出状态"
+
+        # 正常情况：先上锁，再放行退出（macOS 的 ⌘Q / Dock 退出先发的是 Close）
+        win2._lock_before_exit = real_lock
+        ev = QEvent(QEvent.Close)
+        QApplication.sendEvent(app, ev)
+        assert ev.isAccepted(), "上锁成功后应该放行退出"
+        assert win2._quitting and not win2.sessions
+        assert Vault(root2).status()["state"] == C.LOCKED, "系统退出后状态不是 LOCKED"
+        leftovers = [p.name for p in root2.iterdir() if p.name not in (C.VAULT_DIRNAME, C.MARKER_NAME)]
+        assert not leftovers, f"系统退出后还有明文：{leftovers}"
+        app.removeEventFilter(guard)
+    except Exception:  # noqa: BLE001
+        import traceback
+
+        traceback.print_exc()
+        _say("EXITLOCK FAIL（系统退出请求）")
+        return 1
+    _say("EXITLOCK PASS：托盘退出和系统退出请求（⌘Q / Dock / 注销 / 关机）都会先上锁，明文已清空")
     return 0
 
 
