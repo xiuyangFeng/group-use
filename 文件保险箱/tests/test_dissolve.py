@@ -114,7 +114,8 @@ def test_cli_dissolve_forgot(tmp_path, audit_dir):
     root, before = _new(tmp_path, audit_dir)
     r = run_cli(
         ["dissolve", str(root), "--password-stdin", "--forgot", "--yes"],
-        stdin="\n北京\n\n",
+        # 只答第 3 题；用纯 ASCII 答案：Windows 上 --password-stdin 按系统代码页读，不是 UTF-8
+        stdin="\n\n1970-01-02\n",
         audit_dir=audit_dir,
     )
     assert r.returncode == 0, r.stderr
