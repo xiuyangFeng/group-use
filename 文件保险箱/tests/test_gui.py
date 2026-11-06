@@ -131,7 +131,7 @@ def test_gui_version_flag():
         cwd=str(PROJECT),
     )
     assert proc.returncode == 0, proc.stderr
-    assert "文件保险箱 0.6.0" in proc.stdout, proc.stdout
+    assert "文件保险箱 0.6.1" in proc.stdout, proc.stdout
 
 
 def test_store_config_roundtrip(tmp_path):
@@ -146,6 +146,35 @@ def test_store_config_roundtrip(tmp_path):
     assert s2.auto_lock_minutes == 30
     s2.remove_vault(str(tmp_path / "a"))
     assert len(s2.vault_paths()) == 1
+
+
+def test_store_per_vault_auto_lock(tmp_path):
+    import json
+
+    import pytest
+
+    from gui.store import AppStore
+
+    s = AppStore(tmp_path / "cfg")
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    s.add_vault(a)
+    s.add_vault(b)
+    assert s.vault_auto_lock(a) is None and s.effective_auto_lock(a) == 15
+    s.set_vault_auto_lock(a, 120)
+    s.set_vault_auto_lock(b, 0)
+    s.set_auto_lock(30)
+    s2 = AppStore(tmp_path / "cfg")
+    assert s2.effective_auto_lock(a) == 120 and s2.effective_auto_lock(b) == 0
+    s2.set_vault_auto_lock(a, None)
+    assert s2.effective_auto_lock(a) == 30
+    with pytest.raises(ValueError):
+        s2.set_vault_auto_lock(a, 7)
+    # 配置文件里认不出的值：当作跟随默认
+    data = json.loads((tmp_path / "cfg" / "config.json").read_text(encoding="utf-8"))
+    data["vaults"][0]["auto_lock_minutes"] = "abc"
+    (tmp_path / "cfg" / "config.json").write_text(json.dumps(data), encoding="utf-8")
+    s3 = AppStore(tmp_path / "cfg")
+    assert s3.vault_auto_lock(s3.vault_paths()[0]) is None
 
 
 def test_idle_seconds_returns_value():

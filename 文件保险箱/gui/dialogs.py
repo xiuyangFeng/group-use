@@ -36,7 +36,7 @@ from core.audit import WEAK_AUDIT_NOTE, AuditLog
 from core.control import OperationControl
 from core.errors import RecoveryKeyError
 
-from .store import AUTO_LOCK_CHOICES, AppStore, app_data_dir
+from .store import AUTO_LOCK_CHOICES, AUTO_LOCK_NEVER, AppStore, app_data_dir, auto_lock_label
 from .style import button, hero_header, hline, label, spacer
 from .widgets import AnswerForm, PasswordPair, QuestionsEditor
 from .workers import VaultOpWorker
@@ -52,6 +52,7 @@ _ACTIONS = {
     "lock": ("unlocked", "上锁「{name}」", "上锁"),
     "verify": ("locked", "校验「{name}」", "开始校验"),
     "recover": ("warn", "恢复「{name}」", "开始恢复"),
+    "dissolve": ("warn", "解除「{name}」", "解除保险箱"),
 }
 
 
@@ -761,10 +762,15 @@ class SettingsDialog(QDialog):
 
         self.minutes = QComboBox()
         for m in AUTO_LOCK_CHOICES:
-            self.minutes.addItem(f"{m} 分钟", m)
+            self.minutes.addItem(auto_lock_label(m), m)
         idx = self.minutes.findData(store.auto_lock_minutes)
         self.minutes.setCurrentIndex(idx if idx >= 0 else self.minutes.findData(15))
-        gl.addWidget(_setting_row("无操作自动上锁", self.minutes))
+        gl.addWidget(_setting_row("默认自动上锁时间", self.minutes))
+        self.minutes_hint = label("", role="muted", wrap=True)
+        self.minutes_hint.setContentsMargins(16, 0, 12, 10)
+        gl.addWidget(self.minutes_hint)
+        self.minutes.currentIndexChanged.connect(self._update_hint)
+        self._update_hint()
         gl.addWidget(hline())
 
         self.tray_check = QCheckBox("")
@@ -784,6 +790,13 @@ class SettingsDialog(QDialog):
         root.addWidget(ver)
 
         _buttons(root, "保存", self._save, self.reject)
+
+    def _update_hint(self) -> None:
+        if self.minutes.currentData() == AUTO_LOCK_NEVER:
+            text = "没单独设时间的保险箱，解锁后一直保持明文，直到手动上锁、退出程序或关机。离开电脑前记得上锁。"
+        else:
+            text = "没单独设时间的保险箱都用这个。每个保险箱可以单独设：列表里点「改时间」，或 ••• → 自动上锁时间。"
+        self.minutes_hint.setText(text)
 
     def _save(self) -> None:
         self.store.set_auto_lock(int(self.minutes.currentData()))
@@ -919,6 +932,8 @@ _EVENT_NAMES = {
     "RESET_BY_QUESTIONS": "重置密码（密保）",
     "RESET_FAILED": "重置密码失败",
     "SET_QUESTIONS": "设置密保问题",
+    "DISSOLVE": "解除保险箱（不再加密）",
+    "DISSOLVE_FAILED": "解除保险箱失败",
     "RESET_PASSWORD": "重置密码",
     "REGENERATE_RECOVERY": "换恢复密钥",
 }

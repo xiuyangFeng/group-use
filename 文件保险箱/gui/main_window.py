@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -46,7 +46,7 @@ from .dialogs import (
     SettingsDialog,
 )
 from .quit_flow import quit_choices
-from .store import AppStore, idle_seconds
+from .store import AUTO_LOCK_CHOICES, AUTO_LOCK_NEVER, AppStore, auto_lock_label, idle_seconds
 from .style import (
     AMBER,
     GREEN,
@@ -123,14 +123,21 @@ class VaultCard(QWidget):
         sub.setSpacing(6)
         self.dot = QLabel()
         self.dot.setFixedSize(7, 7)
-        self.countdown = QLabel("")
-        self.countdown.setProperty("role", "muted")
+        # 倒计时做成可以点的：点一下就能改自动上锁时间
+        self.countdown = button("", kind="ghost", on_click=self._pick_auto_lock)
+        self.countdown.setStyleSheet(f"color:{MUTED};padding:0 2px;font-weight:400;")
+        self.countdown.setToolTip("点这里改自动上锁时间")
+        self.countdown.setAutoDefault(False)
         if state == C.UNLOCKED and not self._leftover():
             self.dot.setStyleSheet(f"background:{GREEN_DOT};border-radius:3px;")
             sub.addWidget(self.dot, 0, Qt.AlignVCenter)
             self.meta_label = label("已解锁 ·", role="muted")
             sub.addWidget(self.meta_label)
             sub.addWidget(self.countdown)
+            self.change_time = button("改时间", kind="ghost", on_click=self._pick_auto_lock)
+            self.change_time.setStyleSheet("padding:0 2px;font-size:12px;")
+            self.change_time.setAutoDefault(False)
+            sub.addWidget(self.change_time)
             sub.addStretch(1)
         else:
             self.dot.hide()
@@ -189,6 +196,10 @@ class VaultCard(QWidget):
         if ref.get("last_unlock_at"):
             who = f"（{ref['last_unlock_by']}）" if ref.get("last_unlock_by") else ""
             lines.append(f"上次解锁：{ref['last_unlock_at']}{who}")
+        own = self.main.store.vault_auto_lock(self.info["path"])
+        effective = self.main.store.effective_auto_lock(self.info["path"])
+        when = "从不（只在退出时上锁）" if effective == AUTO_LOCK_NEVER else f"{auto_lock_label(effective)}无操作"
+        lines.append(f"自动上锁：{when}" + ("" if own is not None else "（跟随默认）"))
         if self.info.get("questions"):
             lines.append("密保问题：" + " / ".join(self.info["questions"]))
         elif self.info.get("recovery_fingerprint"):
@@ -209,6 +220,10 @@ class VaultCard(QWidget):
         if state == C.LOCKED:
             m.addAction("校验完整性…", lambda: self.main.verify_vault(self.info["path"]))
         m.addSeparator()
+        m.addMenu(self.main.auto_lock_menu(m, self.info["path"]))
+        if state in STABLE:
+            m.addAction("解除保险箱（不再加密）…", lambda: self.main.dissolve_vault(self.info["path"]))
+        m.addSeparator()
         m.addAction("从列表移除", self._remove)
         return m
 
@@ -222,12 +237,24 @@ class VaultCard(QWidget):
             # 脱敏这类长任务跑着的时候，人可能早就离开了电脑；这时不倒计时，也不自动上锁
             self.countdown.setText(f"{inuse.describe(users)}正在使用，用完前不自动上锁")
             return
-        minutes = self.main.store.auto_lock_minutes
+        minutes = self.main.store.effective_auto_lock(self.info["path"])
+        if minutes == AUTO_LOCK_NEVER:
+            self.countdown.setText("不自动上锁 · 用完记得上锁")
+            return
         if idle is None:
-            self.countdown.setText(f"{minutes} 分钟无操作后自动上锁")
+            self.countdown.setText(f"{auto_lock_label(minutes)}无操作后自动上锁")
             return
         remain = int(max(0, minutes * 60 - idle))
-        self.countdown.setText(f"{remain // 60:02d}:{remain % 60:02d} 后自动上锁")
+        if remain >= 3600:
+            text = f"{remain // 3600}:{remain % 3600 // 60:02d}:{remain % 60:02d} 后自动上锁"
+        else:
+            text = f"{remain // 60:02d}:{remain % 60:02d} 后自动上锁"
+        self.countdown.setText(text)
+
+    def _pick_auto_lock(self) -> None:
+        menu = self.main.auto_lock_menu(self, self.info["path"])
+        anchor = self.sender() if isinstance(self.sender(), QWidget) else self.countdown
+        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
     # ---------------------------------------------------------------- 操作
 
@@ -283,7 +310,8 @@ class MainWindow(QMainWindow):
         self._quitting = False
         self._quit_in_progress = False
         self._auto_locking = False
-        self._auto_lock_blocked = False  # 自动上锁失败后，等有人动了键盘鼠标再试，避免每秒弹一次
+        # 自动上锁失败的保险箱：等有人动了键盘鼠标再试，避免每秒弹一次
+        self._auto_lock_blocked: set[str] = set()
         self._last_disk_update = 0.0
         self._last_refresh = 0.0
         self._free_bytes = 0
@@ -483,6 +511,10 @@ class MainWindow(QMainWindow):
             self.list_layout.insertWidget(self.list_layout.count() - 1, group)
             self.list_layout.insertSpacing(self.list_layout.count() - 1, 10)
 
+        if any(c.info["state"] == C.UNLOCKED for c in self.cards):
+            idle = idle_seconds()  # 新建的行马上显示倒计时，不用等下一秒
+            for card in self.cards:
+                card.update_countdown(idle)
         self.scroll.setVisible(bool(vaults))
         self.empty.setVisible(not vaults)
         self.lock_all_btn.setVisible(bool(self.sessions))
@@ -544,32 +576,97 @@ class MainWindow(QMainWindow):
         self._update_disk()
         if self._busy or self._auto_locking or not self.sessions:
             return
-        minutes = self.store.auto_lock_minutes
         if idle is None:
             return
-        if idle < minutes * 60:
-            self._auto_lock_blocked = False
-            return
-        # 外部程序（如 CT 脱敏工具）声明正在用的保险箱先跳过：它用完、标记失效后，
-        # 只要人还没回来，下一秒就会接着自动上锁
-        paths = [p for p in self.sessions if not inuse.active_users(p)]
-        if paths and not self._auto_lock_blocked:
-            self._auto_lock_all(minutes, paths)
+        # 每个保险箱按自己的时间算（没单独设的跟随默认）
+        due: list[str] = []
+        for path in list(self.sessions):
+            minutes = self.store.effective_auto_lock(path)
+            if minutes == AUTO_LOCK_NEVER or idle < minutes * 60:
+                self._auto_lock_blocked.discard(path)  # 人回来过（或不自动锁）：下次到点再试
+                continue
+            # 外部程序（如 CT 脱敏工具）声明正在用的保险箱先跳过：它用完、标记失效后，
+            # 只要人还没回来，下一秒就会接着自动上锁
+            if path in self._auto_lock_blocked or inuse.active_users(path):
+                continue
+            due.append(path)
+        if due:
+            self._auto_lock_all(due)
 
-    def _auto_lock_all(self, minutes: int, paths: list[str] | None = None) -> None:
+    def _auto_lock_all(self, paths: list[str]) -> None:
         self._auto_locking = True
-        paths = list(self.sessions.keys()) if paths is None else paths
         try:
-            self._notify("自动上锁", f"{minutes} 分钟没有操作，正在上锁。")
+            names = "、".join(f"「{_name(p)}」" for p in paths)
+            self._notify("自动上锁", f"{names}到了设定的无操作时间，正在上锁。")
             for path in paths:
                 vault = self.sessions.get(path)
                 if vault is not None:
                     self._run_lock(vault, password=None, auto=True)
-            # 只看这次尝试过的：没锁上的等有人动了键盘鼠标再试，避免每秒弹一次
-            self._auto_lock_blocked = any(p in self.sessions for p in paths)
+            # 没锁上的等有人动了键盘鼠标再试，避免每秒弹一次
+            self._auto_lock_blocked.update(p for p in paths if p in self.sessions)
         finally:
             self._auto_locking = False
             self._refresh()
+
+    def auto_lock_menu(self, parent: QWidget, path: str | None = None) -> QMenu:
+        """「自动上锁时间」子菜单。
+
+        给了 path：只改这个保险箱（第一项「跟随默认」= 不单独设）；没给：改默认时间。"""
+        menu = QMenu("自动上锁时间", parent)
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        default = self.store.auto_lock_minutes
+        if path is not None:
+            own = self.store.vault_auto_lock(path)
+            act = menu.addAction(f"跟随默认（{auto_lock_label(default)}）")
+            act.setCheckable(True)
+            act.setChecked(own is None)
+            act.triggered.connect(lambda _checked=False: self.set_vault_auto_lock(path, None))
+            group.addAction(act)
+            menu.addSeparator()
+        else:
+            own = default
+        for m in AUTO_LOCK_CHOICES:
+            if m == AUTO_LOCK_NEVER:
+                menu.addSeparator()
+            act = menu.addAction(auto_lock_label(m))
+            act.setCheckable(True)
+            act.setChecked(m == own)
+            if path is not None:
+                act.triggered.connect(lambda _checked=False, m=m: self.set_vault_auto_lock(path, m))
+            else:
+                act.triggered.connect(lambda _checked=False, m=m: self.set_auto_lock(m))
+            group.addAction(act)
+        return menu
+
+    def _refresh_countdowns(self) -> None:
+        idle = idle_seconds()
+        for card in self.cards:
+            card.update_countdown(idle)
+            card.setToolTip(card._tooltip())
+
+    def set_auto_lock(self, minutes: int) -> None:
+        """改默认时间（没单独设过的保险箱都跟着变）。"""
+        self.store.set_auto_lock(minutes)
+        self._auto_lock_blocked.clear()
+        self._refresh_countdowns()
+        if minutes == AUTO_LOCK_NEVER:
+            self._notify("默认不再自动上锁", "没单独设时间的保险箱，解锁后会一直保持明文，直到手动上锁或退出程序。")
+        else:
+            self._notify("默认自动上锁时间已修改", f"没单独设时间的保险箱，{auto_lock_label(minutes)}没有操作就自动上锁。")
+
+    def set_vault_auto_lock(self, path: str, minutes: int | None) -> None:
+        """只改这一个保险箱；None = 改回跟随默认。"""
+        self.store.set_vault_auto_lock(path, minutes)
+        self._auto_lock_blocked.discard(path)
+        self._refresh_countdowns()
+        name = _name(path)
+        if minutes is None:
+            self._notify("自动上锁时间已修改", f"「{name}」改回跟随默认（{auto_lock_label(self.store.auto_lock_minutes)}）。")
+        elif minutes == AUTO_LOCK_NEVER:
+            self._notify("不再自动上锁", f"「{name}」解锁后会一直保持明文，直到手动上锁或退出程序。")
+        else:
+            self._notify("自动上锁时间已修改", f"「{name}」{auto_lock_label(minutes)}没有操作就自动上锁。")
 
     # ---------------------------------------------------------------- 输密码（输错了直接重输）
 
@@ -877,6 +974,61 @@ class MainWindow(QMainWindow):
                 problems = result.get("problems") or []
                 lines = "\n".join(f"· {p.get('path')}：{p.get('reason')}" for p in problems[:10])
                 QMessageBox.warning(self, "发现问题", f"{len(problems)} 个文件有问题，请从备份恢复：\n\n{lines}")
+        self._refresh()
+
+    # ---------------------------------------------------------------- 解除保险箱
+
+    def _confirm_dissolve(self, path: str) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("解除保险箱")
+        box.setText(f"解除「{_name(path)}」后，它就是一个普通文件夹了。")
+        box.setInformativeText(
+            "· 里面的文件全部解密成明文，以后不再上锁，也不会自动上锁；\n"
+            "· 这个保险箱的密码和密保问题随之作废；\n"
+            "· 从列表里移除。文件本身不会删除。\n\n"
+            "以后想再加密，重新「＋ 新建」即可。"
+        )
+        ok = box.addButton("解除保险箱", QMessageBox.DestructiveRole)
+        cancel = box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is ok
+
+    def dissolve_vault(self, path: str) -> None:
+        """不想再加密这个文件夹：解锁（锁着的话）并删掉保险箱数据，变回普通文件夹。"""
+        if self._busy:
+            return
+        info = self._vault_info(path)
+        if info.get("needs_recovery") or info["state"] in NEEDS_RECOVERY:
+            QMessageBox.information(self, "先恢复", "上次操作被中断了，请先点「恢复」，再解除保险箱。")
+            return
+        if info["state"] not in STABLE:
+            self._refresh()
+            return
+        if not self._confirm_dissolve(path):
+            return
+
+        def run(cred: dict) -> ProgressDialog:
+            vault = Vault(path, audit_dir=self._audit_dir())
+            control = OperationControl()
+            worker = VaultOpWorker(vault, "dissolve", **cred, control=control, parent=self)
+
+            def rollback() -> VaultOpWorker:
+                return VaultOpWorker(vault, "recover", **cred, rollback=True, parent=self)
+
+            dlg = self._progress(f"正在解除「{_name(path)}」", worker, control, on_rollback=rollback, kind="unlocked")
+            vault.close()
+            if dlg.outcome == "ok":
+                session = self.sessions.pop(path, None)
+                if session is not None:
+                    session.close()
+                self.store.remove_vault(path)
+                self._notify("已解除保险箱", f"「{_name(path)}」现在是普通文件夹，不再加密。")
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+            return dlg
+
+        self._with_credentials(path, "dissolve", run)
         self._refresh()
 
     # ---------------------------------------------------------------- 密码 / 密保问题

@@ -290,7 +290,7 @@ def cmd_unlock(args) -> int:
         return EXIT["ok"]
     print(f"✔ 已解锁：{vault.root}")
     print(f"  {stats['files']} 个文件 / {fsutil.human_bytes(stats['bytes'])}，现在可以正常使用这个文件夹。")
-    print("  用完记得回来上锁（GUI 版会在 15 分钟没操作时自动上锁；命令行版没有自动上锁）。")
+    print("  用完记得回来上锁（GUI 版会按设置的时间无操作后自动上锁；命令行版没有自动上锁）。")
     return EXIT["ok"]
 
 
@@ -393,6 +393,35 @@ def cmd_recover(args) -> int:
     label = STATE_LABEL.get(result["state"], result["state"])
     print(f"✔ 恢复完成：{result['action']}，现在状态是「{label}」")
     print(f"  {result['files']} 个文件 / {fsutil.human_bytes(result['bytes'])}")
+    return EXIT["ok"]
+
+
+def cmd_dissolve(args) -> int:
+    vault = _vault(args)
+    _maybe_recovery_prompt(vault, args)
+    if not args.yes:
+        print(f"解除保险箱：{vault.root}")
+        print("  里面的文件会全部变回明文，以后不再加密；密码和密保问题随之作废。")
+        print("  想再加密，需要重新 create。")
+        try:
+            ans = input("确认解除请输入 YES（其它任意键退出）：").strip()
+        except EOFError:
+            ans = ""
+        if ans != "YES":
+            print("已取消，保险箱没有改动。")
+            return EXIT["ok"]
+    reader = SecretReader(args.password_stdin)
+    cred = credentials(args, vault, reader)
+    pp = ProgressPrinter(_progress_enabled(args))
+    try:
+        stats = vault.dissolve(progress=pp, **cred)
+    finally:
+        pp.done()
+    if args.json:
+        _json_dump({"ok": True, **stats})
+        return EXIT["ok"]
+    print(f"✔ 已解除保险箱：{vault.root}")
+    print(f"  {stats['files']} 个文件 / {fsutil.human_bytes(stats['bytes'])} 都是明文，这个文件夹以后不再加密。")
     return EXIT["ok"]
 
 
@@ -506,6 +535,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  中断后恢复      python -m cli.main recover ~/Desktop/患者数据\n"
             "  忘记密码解锁    python -m cli.main unlock ~/Desktop/患者数据 --forgot\n"
             "  忘记密码重置    python -m cli.main reset-password ~/Desktop/患者数据\n"
+            "  不再加密        python -m cli.main dissolve ~/Desktop/患者数据\n"
             "  审计日志        python -m cli.main audit --limit 20\n"
         ),
     )
@@ -557,6 +587,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--rollback", action="store_true", help="回滚到操作前的状态")
     cred_opts(sp)
     sp.set_defaults(func=cmd_recover)
+
+    sp = sub.add_parser("dissolve", help="解除保险箱：文件全部变回明文，以后不再加密")
+    common(sp)
+    cred_opts(sp)
+    sp.set_defaults(func=cmd_dissolve)
 
     sp = sub.add_parser("change-password", help="修改密码")
     common(sp)

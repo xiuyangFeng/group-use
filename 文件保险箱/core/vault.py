@@ -1234,6 +1234,71 @@ class Vault:
         self._record("SET_QUESTIONS", detail="旧的恢复密钥已作废" if dropped else "")
         return {"questions": h.question_texts, "dropped_recovery_key": dropped}
 
+    # ================================================================ 解除保险箱
+
+    def dissolve(
+        self,
+        password: str | None = None,
+        progress: ProgressFn | None = None,
+        control: OperationControl | None = None,
+        *,
+        recovery_key: bytes | None = None,
+        answers: "list[str | None] | None" = None,
+    ) -> dict:
+        """解除保险箱：以后不再加密，文件夹变回普通文件夹。
+
+        锁着的先解锁（和平时解锁完全一样，中途可以取消 / 回滚）；解锁着的要验证一次密码
+        （或密保 / 旧版恢复密钥）。然后删掉 .vault 和说明文件。密码、密保随之作废。
+        删的顺序：先删 header —— 从那一刻起这个文件夹就不再是保险箱；之后哪一步失败，
+        剩下的也只是用不上的残留，明文文件不受影响。"""
+        self._require_vault()
+        self._header = None
+        h = self.header
+        if h.state in IN_PROGRESS:
+            raise RecoveryNeededError(h.state)
+        if h.state == C.LOCKED:
+            self._precheck_in_use()
+            self.unlock(password, progress, recovery_key, control, answers=answers)
+        elif h.state != C.UNLOCKED:
+            raise VaultStateError(f"当前状态不能解除：{h.state}")
+
+        self._acquire()
+        try:
+            self._header = None
+            h = self.header
+            if h.state != C.UNLOCKED:
+                raise VaultStateError("保险箱刚被别的窗口上锁了，请刷新后再试")
+            self._precheck_in_use()
+            try:
+                self._open_key(password=password, recovery_key=recovery_key, answers=answers)
+            except (PasswordError, RecoveryKeyError, AnswerError) as exc:
+                self._record("DISSOLVE_FAILED", result="fail", detail=str(exc))
+                raise
+            stats = {"files": h.file_count, "bytes": h.total_bytes}
+            self._record("DISSOLVE", detail=f"{h.file_count} 个文件，以后不再加密")
+            protect.release(self.root)
+            os.unlink(long_path(self.header_path))
+            if self.marker_path.exists():
+                os.unlink(long_path(self.marker_path))
+            lock_file = self.vault_dir / "instance.lock"
+            for child in list(self.vault_dir.iterdir()):
+                if child == lock_file:
+                    continue  # 自己还拿着它（Windows 上删不掉打开着的文件），放锁后再删
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(long_path(child), ignore_errors=True)
+                else:
+                    try:
+                        os.unlink(long_path(child))
+                    except OSError:
+                        pass
+        finally:
+            self._release()
+        self.close()
+        self._flock = None
+        shutil.rmtree(long_path(self.vault_dir), ignore_errors=True)
+        self._emit(progress, "已解除", done_files=stats["files"], total_files=stats["files"])
+        return stats
+
     # ================================================================ 维护
 
     def _cleanup_tmp(self) -> None:

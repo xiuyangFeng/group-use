@@ -755,6 +755,119 @@ def main() -> int:
 
     check("上锁失败保留密钥，之后「全部上锁」不用再输密码", _lock_fail_keeps_session)
 
+    def _auto_lock_per_vault():
+        a_t = tmp / "自动锁-A"
+        b_t = tmp / "自动锁-B"
+        make_vault(a_t, cfg)
+        make_vault(b_t, cfg)
+        s = AppStore(cfg / "store15")
+        ka = s.add_vault(a_t)["path"]
+        kb = s.add_vault(b_t)["path"]
+        w = mw.MainWindow(s)
+        va, vb = Vault(a_t, audit_dir=cfg), Vault(b_t, audit_dir=cfg)
+        va.unlock(PASSWORD)
+        vb.unlock(PASSWORD)
+        w.sessions[ka] = va
+        w.sessions[kb] = vb
+        locked: list = []
+        old_idle = mw.idle_seconds
+        old_run = w._run_lock
+        w._run_lock = lambda vault, **kw: locked.append(w._session_path(vault))
+        try:
+            w._refresh()
+            card_a = next(c for c in w.cards if c.info["path"] == ka)
+            card_b = next(c for c in w.cards if c.info["path"] == kb)
+            # 单个保险箱的菜单：第一项「跟随默认」，默认选中
+            menu = w.auto_lock_menu(card_a, ka)
+            labels = [a.text() for a in menu.actions() if a.text()]
+            assert labels[0] == "跟随默认（15 分钟）" and "2 小时" in labels and "从不（只在退出时上锁）" in labels, labels
+            assert [a.text() for a in menu.actions() if a.isChecked()] == ["跟随默认（15 分钟）"]
+            items = [a.text() for a in card_a._build_menu().actions()]
+            assert "自动上锁时间" in items and "解除保险箱（不再加密）…" in items, items
+            # A 改成 2 小时，B 改成 5 分钟：互不影响，重启后还在
+            next(a for a in menu.actions() if a.text() == "2 小时").trigger()
+            w.set_vault_auto_lock(kb, 5)
+            s2 = AppStore(cfg / "store15")
+            assert s2.vault_auto_lock(ka) == 120 and s2.vault_auto_lock(kb) == 5 and s2.auto_lock_minutes == 15
+            card_a = next(c for c in w.cards if c.info["path"] == ka)
+            card_a.update_countdown(60)
+            assert card_a.countdown.text() == "1:59:00 后自动上锁", card_a.countdown.text()
+            assert "自动上锁：2 小时无操作" in card_a.toolTip(), card_a.toolTip()
+            # 空闲 6 分钟：只锁 B
+            mw.idle_seconds = lambda: 360
+            w._on_tick()
+            assert locked == [kb], locked
+            # 改默认不影响单独设过的；A 改回跟随默认后按默认 15 分钟算
+            w.set_auto_lock(30)
+            assert s.effective_auto_lock(ka) == 120
+            w.set_vault_auto_lock(ka, None)
+            assert s.effective_auto_lock(ka) == 30 and s.vault_auto_lock(ka) is None
+            # A 设成「从不」：空闲再久也不锁 A
+            w.set_vault_auto_lock(ka, 0)
+            locked.clear()
+            mw.idle_seconds = lambda: 10 * 3600
+            w._on_tick()
+            assert ka not in locked, locked
+            assert "不自动上锁" in next(c for c in w.cards if c.info["path"] == ka).countdown.text()
+        finally:
+            mw.idle_seconds = old_idle
+            w._run_lock = old_run
+            va.close()
+            vb.close()
+            w.sessions.clear()
+            w._quitting = True
+            w.close()
+
+    check("每个保险箱单独设自动上锁时间（跟随默认 / 2 小时 / 5 分钟 / 从不）", _auto_lock_per_vault)
+
+    def _dissolve():
+        locked_t = tmp / "解除-锁着的"
+        make_tree(locked_t)
+        before_locked = snapshot(locked_t)
+        make_vault(locked_t, cfg)
+        open_t = tmp / "解除-解锁着的"
+        make_tree(open_t)
+        before_open = snapshot(open_t)
+        make_vault(open_t, cfg)
+        s = AppStore(cfg / "store16")
+        s.add_vault(locked_t)
+        key_open = s.add_vault(open_t)["path"]
+        w = mw.MainWindow(s)
+        sv = Vault(open_t, audit_dir=cfg)
+        sv.unlock(PASSWORD)
+        w.sessions[key_open] = sv
+        saved: list = []
+        confirms = iter([False, True, True])
+        pw = iter(["000000", PASSWORD, PASSWORD])
+        errors: list = []
+
+        def fake_ask(parent, path, *, action="unlock", error="", note=""):
+            assert action == "dissolve", action
+            errors.append(error)
+            return next(pw), False
+
+        _patch(w, "_confirm_dissolve", lambda _p: next(confirms), saved)
+        _patch(mw.PasswordDialog, "ask", staticmethod(fake_ask), saved)
+        _patch(mw.QDesktopServices, "openUrl", staticmethod(lambda *_a: True), saved)
+        try:
+            w.dissolve_vault(str(locked_t.resolve()))  # 取消确认：什么都不动
+            assert Vault(locked_t).status()["state"] == C.LOCKED and errors == []
+            w.dissolve_vault(str(locked_t.resolve()))  # 先输错一次，再输对
+            assert errors == ["", "密码不对，再试一次"], errors
+            assert not Vault(locked_t).is_vault() and not (locked_t / C.VAULT_DIRNAME).exists()
+            assert snapshot(locked_t) == before_locked
+            w.dissolve_vault(key_open)  # 本次解锁着的：解除后会话也清掉
+            assert not Vault(open_t).is_vault() and snapshot(open_t) == before_open
+            assert not w.sessions
+            assert s.vault_paths() == [] and len(w.cards) == 0
+            assert dl._event_name("DISSOLVE") == "解除保险箱（不再加密）"
+        finally:
+            _restore(saved)
+            w._quitting = True
+            w.close()
+
+    check("解除保险箱：锁着的 / 解锁着的都变回普通文件夹", _dissolve)
+
 
     _say("")
     if FAILED:

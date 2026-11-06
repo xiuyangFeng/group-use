@@ -14,14 +14,14 @@ from core.vault import Vault
 
 
 class VaultOpWorker(QThread):
-    """执行一次 core 操作（解锁/上锁/恢复/校验/首次上锁）。"""
+    """执行一次 core 操作（解锁/上锁/恢复/校验/首次上锁/解除保险箱）。"""
 
     progressed = Signal(dict)
     succeeded = Signal(object)
     failed = Signal(str, str)
     cancelled = Signal()
 
-    OPS = {"unlock", "lock", "initial_lock", "recover", "verify"}
+    OPS = {"unlock", "lock", "initial_lock", "recover", "verify", "dissolve"}
 
     def __init__(
         self,
@@ -61,6 +61,14 @@ class VaultOpWorker(QThread):
                 )
             elif self.op == "lock":
                 result = self.vault.lock(
+                    password=self.password,
+                    recovery_key=self.recovery_key,
+                    answers=self.answers,
+                    progress=self._progress,
+                    control=self.control,
+                )
+            elif self.op == "dissolve":
+                result = self.vault.dissolve(
                     password=self.password,
                     recovery_key=self.recovery_key,
                     answers=self.answers,

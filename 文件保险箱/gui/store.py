@@ -14,7 +14,19 @@ from core import fsutil
 
 APP_NAME = "文件保险箱"
 DEFAULT_AUTO_LOCK_MIN = 15
-AUTO_LOCK_CHOICES = (5, 10, 15, 20, 30, 60)
+AUTO_LOCK_NEVER = 0  # 不按空闲时间自动上锁（退出程序 / 注销 / 关机时照样会先上锁）
+AUTO_LOCK_CHOICES = (1, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, 480, AUTO_LOCK_NEVER)
+
+
+def auto_lock_label(minutes: int) -> str:
+    """下拉框 / 菜单里显示的文字。"""
+    if minutes == AUTO_LOCK_NEVER:
+        return "从不（只在退出时上锁）"
+    if minutes >= 60 and minutes % 60 == 0:
+        return f"{minutes // 60} 小时"
+    if minutes > 60:
+        return f"{minutes // 60} 小时 {minutes % 60} 分钟"
+    return f"{minutes} 分钟"
 
 
 def app_data_dir() -> Path:
@@ -49,6 +61,10 @@ class AppStore:
         self.data["vaults"] = [v for v in self.data.get("vaults", []) if isinstance(v, dict) and v.get("path")]
         if self.data.get("auto_lock_minutes") not in AUTO_LOCK_CHOICES:
             self.data["auto_lock_minutes"] = DEFAULT_AUTO_LOCK_MIN
+        for v in self.data["vaults"]:
+            # 单个保险箱自己的时间：认不出的值当作「跟随默认」
+            if "auto_lock_minutes" in v and v["auto_lock_minutes"] not in AUTO_LOCK_CHOICES:
+                v.pop("auto_lock_minutes")
 
     def save(self) -> None:
         try:
@@ -112,7 +128,37 @@ class AppStore:
         return int(self.data.get("auto_lock_minutes", DEFAULT_AUTO_LOCK_MIN))
 
     def set_auto_lock(self, minutes: int) -> None:
-        self.data["auto_lock_minutes"] = int(minutes)
+        minutes = int(minutes)
+        if minutes not in AUTO_LOCK_CHOICES:
+            raise ValueError(f"不支持的自动上锁时间：{minutes}")
+        self.data["auto_lock_minutes"] = minutes
+        self.save()
+
+    # 每个保险箱可以单独设自动上锁时间；没设的跟随上面的默认值
+
+    def vault_auto_lock(self, path: str) -> int | None:
+        """这个保险箱单独设的时间；None 表示跟随默认。"""
+        ref = self.get(path)
+        if ref is None or "auto_lock_minutes" not in ref:
+            return None
+        return int(ref["auto_lock_minutes"])
+
+    def effective_auto_lock(self, path: str) -> int:
+        own = self.vault_auto_lock(path)
+        return self.auto_lock_minutes if own is None else own
+
+    def set_vault_auto_lock(self, path: str, minutes: int | None) -> None:
+        """minutes 为 None：改回跟随默认。"""
+        ref = self.get(path)
+        if ref is None:
+            raise KeyError(path)
+        if minutes is None:
+            ref.pop("auto_lock_minutes", None)
+        else:
+            minutes = int(minutes)
+            if minutes not in AUTO_LOCK_CHOICES:
+                raise ValueError(f"不支持的自动上锁时间：{minutes}")
+            ref["auto_lock_minutes"] = minutes
         self.save()
 
     @property
