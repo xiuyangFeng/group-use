@@ -6,7 +6,7 @@ import json
 
 from core.audit import AuditLog
 from core.vault import Vault
-from tests.conftest import PASSWORD, make_tree
+from tests.conftest import PASSWORD, QUESTIONS, make_tree
 
 
 def test_chain_ok(tmp_path):
@@ -63,7 +63,7 @@ def test_vault_records_events(tmp_path, audit_dir):
     root = tmp_path / "data"
     make_tree(root)
     v = Vault(root, audit_dir=audit_dir)
-    v.create(PASSWORD)
+    v.create(PASSWORD, QUESTIONS)
     v.unlock(password=PASSWORD)
     v.lock(password=PASSWORD)
     v.verify(password=PASSWORD)

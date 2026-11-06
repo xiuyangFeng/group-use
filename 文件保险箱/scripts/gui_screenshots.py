@@ -25,7 +25,7 @@ from PySide6.QtGui import QIcon  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMenu  # noqa: E402
 
 from core.vault import Vault  # noqa: E402
-from tests.conftest import PASSWORD, make_tree  # noqa: E402
+from tests.conftest import PASSWORD, QUESTIONS, make_tree  # noqa: E402
 
 OUT = Path(os.environ.get("FDVAULT_SHOTS_OUT") or (PROJECT / "docs" / "images" / "gui"))
 TMP = Path(tempfile.mkdtemp(prefix="fdvault-shots-"))
@@ -65,7 +65,7 @@ def make_vault(root: Path, cfg: Path) -> None:
     for i in range(12):
         (root / f"样本-{i + 1:02d}.txt").write_text(f"演示数据 {i}\n" * 40, "utf-8")
     v = Vault(root, audit_dir=cfg)
-    v.create(PASSWORD)
+    v.create(PASSWORD, QUESTIONS)
     v.close()
 
 
@@ -76,12 +76,13 @@ def main() -> int:
     from gui import main_window as mw
     from gui.dialogs import (
         AuditWindow,
+        AnswersDialog,
         ChangePasswordDialog,
-        NewRecoveryKeyDialog,
         PasswordDialog,
         ResetPasswordDialog,
         ProgressDialog,
         RecoveryDialog,
+        SecurityQuestionsDialog,
         SettingsDialog,
     )
     from gui.store import AppStore
@@ -153,13 +154,14 @@ def main() -> int:
     app.processEvents()
     shot(wiz, "03-wizard-password.png")
 
-    wiz.next()  # prepare：生成密钥（测试用低强度 KDF，很快）
+    wiz.next()
     app.processEvents()
-    shot(wiz, "04-wizard-recovery.png")
+    for edit, (_q, a) in zip(wiz.page_questions.editor.answers, QUESTIONS):
+        edit.setText(a)
+    app.processEvents()
+    shot(wiz, "04-wizard-questions.png")
 
-    # 用假进度渲染「首次上锁」页面，避免真的跑完
-    wiz.page_recovery.check.setChecked(True)
-    app.processEvents()
+    # 用假进度渲染「首次上锁」页面，避免真的跑完（这一步 next 会生成密钥，测试用低强度 KDF，很快）
     wiz.begin_initial_lock = lambda page: page.update_progress(  # type: ignore[assignment]
         {"done_files": 187, "total_files": 480, "done_bytes": 40 * 1024 * 1024, "total_bytes": 100 * 1024 * 1024}
     )
@@ -170,32 +172,38 @@ def main() -> int:
 
     # ---------------- 弹窗 ----------------
     dlg = PasswordDialog(win, str(v1))
-    dlg.input.setText("demo-password-123")
+    dlg.input.setText("246810")
     shot(dlg, "06-unlock.png")
     dlg.reject()
 
     dlg = PasswordDialog(win, str(v1), error="密码不对，再试一次")
-    dlg.input.setText("demo-password-123")
+    dlg.input.setText("246811")
     shot(dlg, "06b-unlock-wrong.png")
     dlg.reject()
 
-    reset = ResetPasswordDialog(win, str(v1))
-    reset.key_input.setText("ZHD6-6KW4-Q2MN-8XRT-4HPA-J7CE-WB3F-9LKD")
+    qtexts = [q for q, _a in QUESTIONS]
+    answers = AnswersDialog(win, str(v1), qtexts)
+    answers.form.edits[1].setText("北京")
+    shot(answers, "14a-forgot-answers.png")
+    answers.reject()
+
+    reset = ResetPasswordDialog(win, str(v1), qtexts)
+    reset.form.edits[0].setText("1998-03-12")
     reset.pair.pw1.setText(PASSWORD)
     reset.pair.pw2.setText(PASSWORD)
     shot(reset, "14-reset-password.png")
     reset.reject()
 
     change = ChangePasswordDialog(win, str(v1))
-    change.old.setText("old-password")
-    change.pair.pw1.setText("Short1")
+    change.old.setText("246810")
+    change.pair.pw1.setText("135")
     shot(change, "15-change-password.png")
     change.reject()
 
-    newkey = NewRecoveryKeyDialog(win, "ZHD6-6KW4-Q2MN-8XRT-4HPA-J7CE-WB3F-9LKD", "a1b2c3d4")
-    shot(newkey, "16-new-recovery-key.png")
-    newkey.check.setChecked(True)
-    newkey.accept()
+    sq = SecurityQuestionsDialog(win, str(v1), qtexts)
+    sq.pw.setText(PASSWORD)
+    shot(sq, "16-security-questions.png")
+    sq.reject()
 
     card_menu = win.cards[0]._build_menu()
     card_menu.popup(QPoint(300, 300))

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import PASSWORD, make_tree, run_cli, snapshot, state_of
+from tests.conftest import PASSWORD, QUESTIONS_STDIN, make_tree, run_cli, snapshot, state_of
 
 UNLOCK_POINTS = [
     "unlock:after_blob_read_verify",
@@ -35,7 +35,7 @@ LOCK_POINTS = [
 def _create(root, audit_dir):
     r = run_cli(
         ["create", str(root), "--password-stdin", "--yes", "--no-progress"],
-        stdin=PASSWORD + "\n",
+        stdin=PASSWORD + "\n" + QUESTIONS_STDIN,
         audit_dir=audit_dir,
     )
     assert r.returncode == 0, r.stderr

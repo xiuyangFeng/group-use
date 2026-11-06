@@ -1,7 +1,7 @@
 """试点彩排：用假数据把《试点方案》里的关键流程在 1 个脚本里跑一遍。
 
 不接触真实患者数据；生成临时文件夹（含中文名/大文件/空文件/子目录），
-依次演练：建库 → 解锁/上锁 → 改文件 → 恢复密钥重设密码 → 文件占用时上锁中止
+依次演练：建库 → 解锁/上锁 → 改文件 → 答密保问题重设密码 → 文件占用时上锁中止
 → 审计导出 → 明文残留扫描 → 最终解锁校验。
 结果写到 reports/pilot-rehearsal.json，供 M4 试点报告引用。
 
@@ -31,8 +31,9 @@ from core.console import setup_utf8_stdio  # noqa: E402
 os.environ.setdefault("FDVAULT_KDF_FAST", "1")  # 彩排只验证流程，不测 Argon2 耗时
 os.environ.setdefault("FDVAULT_NO_PROTECT", "1")  # 临时目录里的保险箱不加防删除保护，用完能直接删
 
-PASSWORD = "Pilot-Password-1234"
-NEW_PASSWORD = "Pilot-Password-5678"
+PASSWORD = "246810"
+NEW_PASSWORD = "135790"
+QUESTIONS = [("我的生日", "1990-05-20"), ("我出生的城市", "成都"), ("父亲的生日", "1962-11-03")]
 MARKER = "PILOT-REHEARSAL-PLAINTEXT-MARKER-c41d"
 
 _steps: list[dict] = []
@@ -98,8 +99,7 @@ def step_create(root: Path, ctx: dict) -> str:
     from core.vault import Vault
 
     v = Vault(root, audit_dir=ctx["audit_dir"])
-    info = v.create(PASSWORD)
-    ctx["recovery_key"] = info["recovery_key"]
+    info = v.create(PASSWORD, QUESTIONS)
     v.close()
     state = Vault(root).status()["state"]
     assert state == C.LOCKED, state
@@ -143,15 +143,13 @@ def step_modify(root: Path, ctx: dict) -> str:
     return "3 处变更"
 
 
-@_step("恢复密钥重设密码，旧密码失效")
+@_step("答对一个密保问题重设密码，旧密码失效")
 def step_recovery_root(root: Path, ctx: dict) -> str:
-    from core.crypto import recovery_key_parse
     from core.errors import PasswordError
     from core.vault import Vault
 
-    key = recovery_key_parse(ctx["recovery_key"])
     v = Vault(root, audit_dir=ctx["audit_dir"])
-    v.reset_with_recovery_key(key, NEW_PASSWORD)
+    v.reset_with_answers(["", "成都市", ""], NEW_PASSWORD)
     v.close()
     v = Vault(root, audit_dir=ctx["audit_dir"])
     try:

@@ -12,11 +12,11 @@ from core import constants as C
 from core import protect
 from core.errors import PasswordError
 from core.vault import Vault
-from tests.conftest import PASSWORD, make_tree, snapshot
+from tests.conftest import PASSWORD, QUESTIONS, make_tree, snapshot
 
 pytestmark = pytest.mark.skipif(not (protect.IS_MAC or protect.IS_WINDOWS), reason="只支持 macOS / Windows")
 
-NEW_PASSWORD = "Another-Pass-5678"
+NEW_PASSWORD = "135790"
 
 
 @pytest.fixture
@@ -25,7 +25,7 @@ def locked_vault(tmp_path, audit_dir):
     make_tree(root)
     before = snapshot(root)
     v = Vault(root, audit_dir=audit_dir)
-    info = v.create(PASSWORD)
+    info = v.create(PASSWORD, QUESTIONS)
     v.close()
     return root, before, info
 
@@ -112,8 +112,11 @@ def test_password_ops_and_verify_work_while_locked(locked_vault, audit_dir, tmp_
     assert v.verify(PASSWORD)["ok"]
     v.close()
     Vault(root, audit_dir=audit_dir).change_password(PASSWORD, NEW_PASSWORD)
-    rec = Vault(root, audit_dir=audit_dir).regenerate_recovery_key(NEW_PASSWORD)
-    assert rec["recovery_key"]
+    res = Vault(root, audit_dir=audit_dir).set_security_questions(
+        NEW_PASSWORD, [("父亲的生日", "1966-06-06"), ("我小时候的小名", "豆豆"), ("我出生的城市", "上海")]
+    )
+    assert res["questions"] == ["父亲的生日", "我小时候的小名", "我出生的城市"]
+    Vault(root, audit_dir=audit_dir).reset_with_answers(["", "豆豆", ""], NEW_PASSWORD)
     assert Vault(root).status()["protected"] is True
     assert protect.probe(root, tmp_path) == []
     v = Vault(root, audit_dir=audit_dir)
@@ -136,7 +139,7 @@ def test_switch_off(tmp_path, audit_dir, monkeypatch):
     root = tmp_path / "临时"
     make_tree(root)
     v = Vault(root, audit_dir=audit_dir)
-    v.create(PASSWORD)
+    v.create(PASSWORD, QUESTIONS)
     v.close()
     assert Vault(root).status()["protected"] is False
     assert Vault(root).ensure_protected() is False

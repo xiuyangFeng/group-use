@@ -51,7 +51,7 @@ def test_diagnostics_zip(tmp_path):
         names = set(zf.namelist())
         assert {"说明.txt", "环境信息.txt", "config.json", "gui.log", "audit.jsonl"} <= names
         note = zf.read("说明.txt").decode("utf-8")
-        assert "不含：密码、恢复密钥" in note
+        assert "不含：密码、密保答案" in note
         assert "最后一行错误" in zf.read("gui.log").decode("utf-8")
         assert "CREATE" in zf.read("audit.jsonl").decode("utf-8")
         env_text = zf.read("环境信息.txt").decode("utf-8")

@@ -11,7 +11,7 @@ from core import constants as C
 from core.errors import IntegrityError, PasswordError, VaultError
 from core import protect
 from core.vault import Vault
-from tests.conftest import PASSWORD, make_tree, snapshot, write_file
+from tests.conftest import PASSWORD, QUESTIONS, make_tree, snapshot, write_file
 
 
 def open_vault(root: Path, audit_dir: Path) -> Vault:
@@ -20,8 +20,8 @@ def open_vault(root: Path, audit_dir: Path) -> Vault:
 
 def create_vault(root: Path, audit_dir: Path) -> dict:
     v = open_vault(root, audit_dir)
-    res = v.create(PASSWORD)
-    assert len(res["recovery_key"].replace("-", "")) == 32
+    res = v.create(PASSWORD, QUESTIONS)
+    assert res["questions"] == [q for q, _a in QUESTIONS]
     v.close()
     return res
 
@@ -172,18 +172,18 @@ def test_unlock_refuses_when_blob_missing(tmp_path, audit_dir):
 
 
 def test_short_password_rejected(tmp_path, audit_dir):
-    """密码规则：至少 8 位，且必须同时含数字、大写、小写；不合格的不能建库。"""
+    """密码规则：正好 6 位数字；不合格的不能建库。"""
     from core import passwords
 
     root = tmp_path / "data"
     root.mkdir()
     (root / "a.txt").write_bytes(b"x")
-    # 合法的 8 位样例（规则函数本身也要对）
-    assert passwords.password_problems("Abcdef12") == []
-    for bad in ("short", "alllowercase1", "ALLUPPERCASE1", "NoDigitsHere", "Ab1"):
+    # 合法样例（规则函数本身也要对）
+    assert passwords.password_problems("123456") == []
+    for bad in ("12345", "1234567", "Abcdef12", "12345a", "", "12 456"):
         v = open_vault(root, audit_dir)
         with pytest.raises(VaultError) as exc:
-            v.create(bad)
+            v.create(bad, QUESTIONS)
         assert "不符合要求" in str(exc.value)
         assert not (root / ".vault").exists()
 
@@ -194,7 +194,7 @@ def test_create_twice_rejected(tmp_path, audit_dir):
     create_vault(root, audit_dir)
     v = open_vault(root, audit_dir)
     with pytest.raises(VaultError):
-        v.create(PASSWORD)
+        v.create(PASSWORD, QUESTIONS)
 
 
 def test_state_machine_rejects_wrong_ops(tmp_path, audit_dir):
@@ -208,7 +208,7 @@ def test_state_machine_rejects_wrong_ops(tmp_path, audit_dir):
     with pytest.raises(VaultStateError):
         v.lock(password=PASSWORD)  # 已经锁着
     with pytest.raises(AlreadyVaultError):
-        v.create(PASSWORD)  # 已经存在，不能重复创建
+        v.create(PASSWORD, QUESTIONS)  # 已经存在，不能重复创建
     v.close()
 
 
@@ -237,7 +237,7 @@ def test_weird_names_and_long_paths(tmp_path, audit_dir):
 
     before = snapshot(root)
     v = Vault(root, audit_dir=audit_dir)
-    v.create(PASSWORD)
+    v.create(PASSWORD, QUESTIONS)
     v.close()
     v = Vault(root, audit_dir=audit_dir)
     v.unlock(PASSWORD)

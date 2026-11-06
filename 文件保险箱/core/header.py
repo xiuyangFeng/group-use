@@ -1,4 +1,4 @@
-"""header.json 的读写：明文外壳，不含任何秘密（密钥都是包裹后的密文）。"""
+"""header.json 的读写：明文外壳，不含任何秘密（密钥都是包裹后的密文；密保只存问题，不存答案）。"""
 
 from __future__ import annotations
 
@@ -32,13 +32,25 @@ class Header:
     total_bytes: int = 0
     failed_attempts: int = 0
     last_failed_at: str = ""
+    # 密保问题：[{"q": 问题原文, "kind": 答案类型, "kdf": {..., "salt"}, "wrapped": {"n", "c"}}]
+    questions: list = field(default_factory=list)
+
+    @property
+    def has_recovery_key(self) -> bool:
+        return bool(self.wrapped_rec)
+
+    @property
+    def question_texts(self) -> list[str]:
+        return [str(q.get("q", "")) for q in self.questions]
 
     # ---------------------------------------------------------------- 序列化
 
     def to_dict(self) -> dict:
-        return {
+        # 还是「恢复密钥、没有密保」的老样子就继续写版本 1，旧版软件也能打开
+        legacy = self.has_recovery_key and not self.questions
+        data = {
             "format": C.FORMAT,
-            "version": C.FORMAT_VERSION,
+            "version": C.FORMAT_VERSION_LEGACY if legacy else C.FORMAT_VERSION,
             "vault_id": self.vault_id,
             "created_at": self.created_at,
             "kdf": self.kdf,
@@ -53,6 +65,9 @@ class Header:
             "failed_attempts": self.failed_attempts,
             "last_failed_at": self.last_failed_at,
         }
+        if self.questions:
+            data["security_questions"] = self.questions
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "Header":
@@ -66,15 +81,16 @@ class Header:
                 created_at=str(data["created_at"]),
                 kdf=dict(data["kdf"]),
                 wrapped_pw=dict(data["wrapped_vault_key_password"]),
-                wrapped_rec=dict(data["wrapped_vault_key_recovery"]),
-                recovery_fingerprint=str(data["recovery_fingerprint"]),
-                recovery_generated_at=str(data["recovery_generated_at"]),
+                wrapped_rec=dict(data.get("wrapped_vault_key_recovery") or {}),
+                recovery_fingerprint=str(data.get("recovery_fingerprint") or ""),
+                recovery_generated_at=str(data.get("recovery_generated_at") or ""),
                 state=str(data["state"]),
                 state_since=str(data["state_since"]),
                 file_count=int(data.get("file_count", 0)),
                 total_bytes=int(data.get("total_bytes", 0)),
                 failed_attempts=int(data.get("failed_attempts", 0)),
                 last_failed_at=str(data.get("last_failed_at", "")),
+                questions=[dict(q) for q in (data.get("security_questions") or [])],
             )
         except KeyError as exc:
             raise NotAVaultError(f"header.json 缺少字段：{exc}")
@@ -82,18 +98,19 @@ class Header:
     # ---------------------------------------------------------------- 便捷方法
 
     @staticmethod
-    def new(kdf: dict, wrapped_pw: dict, wrapped_rec: dict, rec_fp: str) -> "Header":
+    def new(kdf: dict, wrapped_pw: dict, questions: list) -> "Header":
         ts = now_iso()
         return Header(
             vault_id=str(uuid.uuid4()),
             created_at=ts,
             kdf=kdf,
             wrapped_pw=wrapped_pw,
-            wrapped_rec=wrapped_rec,
-            recovery_fingerprint=rec_fp,
-            recovery_generated_at=ts,
+            wrapped_rec={},
+            recovery_fingerprint="",
+            recovery_generated_at="",
             state=C.LOCKING,
             state_since=ts,
+            questions=questions,
         )
 
     @property

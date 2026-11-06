@@ -30,6 +30,7 @@ os.environ.setdefault("FDVAULT_SKIP_BUSY_CHECK", "1")
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
+from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from core.console import hard_exit, setup_utf8_stdio
@@ -38,7 +39,7 @@ from core.audit import AuditLog  # noqa: E402
 from core.control import OperationControl  # noqa: E402
 from core.crypto import new_recovery_key, recovery_key_str  # noqa: E402
 from core.vault import Vault  # noqa: E402
-from tests.conftest import PASSWORD, make_tree, snapshot  # noqa: E402
+from tests.conftest import PASSWORD, QUESTIONS, make_tree, snapshot  # noqa: E402
 
 app = QApplication([])
 
@@ -90,7 +91,7 @@ def make_vault(root: Path, cfg: Path) -> None:
     if not root.exists():
         make_tree(root)
     v = Vault(root, audit_dir=cfg)
-    v.create(PASSWORD)
+    v.create(PASSWORD, QUESTIONS)
     v.close()
 
 
@@ -277,6 +278,7 @@ def main() -> int:
         dlg._submit()
         assert dlg.password == "correct-horse" and dlg.result() == 1
 
+        # 旧版本保险箱还能用恢复密钥
         key = new_recovery_key()
         dlg2 = PasswordDialog(None, str(tmp / "x"), recovery=True)
         dlg2.show()
@@ -287,7 +289,19 @@ def main() -> int:
         dlg2._submit()
         assert dlg2.recovery_key == key
 
-    check("密码 / 恢复密钥校验", _password)
+        # 忘记密码：答密保，一个都没填时不能提交
+        from gui.dialogs import AnswersDialog
+
+        dlg3 = AnswersDialog(None, str(tmp / "x"), ["我的生日", "我出生的城市", "母亲的生日"])
+        dlg3.show()
+        assert not dlg3.ok.isEnabled()
+        assert "1998-03-12" in dlg3.form.edits[0].placeholderText()
+        dlg3.form.edits[1].setText("北京")
+        assert dlg3.ok.isEnabled()
+        dlg3._submit()
+        assert dlg3.answers == ["", "北京", ""] and dlg3.result() == 1
+
+    check("密码 / 密保作答 / 旧版恢复密钥", _password)
 
     def _progress():
         dlg = ProgressDialog(None, "正在解锁", "测试", control=OperationControl())
@@ -362,12 +376,16 @@ def main() -> int:
         pump()
         assert wiz.currentId() == wiz.PAGE_PASSWORD
         # 密码框实时核对：不合格时要立刻显示缺哪条，而不是一直空白等待
-        wiz.page_password.pw1.setText("short")
-        wiz.page_password.pw2.setText("short")
+        wiz.page_password.pw1.setText("123")
+        wiz.page_password.pw2.setText("123")
         pump()
         assert not wiz.page_password.isComplete()
-        assert "8 位以上" in wiz.page_password.rules.text() and "○" in wiz.page_password.rules.text()
+        assert "6 位" in wiz.page_password.rules.text() and "○" in wiz.page_password.rules.text()
         assert "还没满足" in wiz.page_password.hint.text()
+        # 只能输数字、最多 6 位
+        wiz.page_password.pw1.clear()
+        QTest.keyClicks(wiz.page_password.pw1, "12ab345678")
+        assert wiz.page_password.pw1.text() == "123456", wiz.page_password.pw1.text()
         wiz.page_password.pw1.setText(PASSWORD)
         wiz.page_password.pw2.setText(PASSWORD)
         pump()
@@ -375,10 +393,26 @@ def main() -> int:
         assert "✓ 两次一致" in wiz.page_password.hint.text()
         wiz.next()
         pump()
-        assert wiz.currentId() == wiz.PAGE_RECOVERY
-        assert wiz.prepared is not None
-        assert len(wiz.prepared["recovery_key"].replace("-", "")) == 32
-        wiz.page_recovery.check.setChecked(True)
+        assert wiz.currentId() == wiz.PAGE_QUESTIONS
+        assert wiz.prepared is None  # 设好密保之前不动文件夹
+        page = wiz.page_questions
+        ed = page.editor
+        assert not page.isComplete()
+        # 三个问题不能重复：别的下拉框里已选的项是灰的
+        picked = ed.combos[0].currentText()
+        idx = ed.combos[1].findText(picked)
+        assert not ed.combos[1].model().item(idx).isEnabled()
+        ed.combos[1].setCurrentText("母亲的生日")
+        ed.answers[0].setText("1998-3-12")
+        ed.answers[1].setText("1968年5月5日")
+        ed.answers[2].setText("下个月")
+        pump()
+        assert not page.isComplete() and "日期看不懂" in ed.hint.text(), ed.hint.text()
+        ed.combos[2].setCurrentText("我出生的城市")
+        ed.answers[2].setText("北京市")
+        pump()
+        assert page.isComplete(), ed.hint.text()
+        assert "✓" in ed.hint.text()
         wiz.next()
         pump(0.05)
         deadline = time.time() + 60
@@ -388,12 +422,13 @@ def main() -> int:
         assert Vault(target).status()["state"] == C.LOCKED
         wiz._set_buttons_locked(False)
         wiz.accept()
+        assert Vault(target).status()["questions"] == ["我的生日", "母亲的生日", "我出生的城市"]
         v = Vault(target, audit_dir=cfg)
-        v.unlock(PASSWORD)
+        v.unlock(answers=[None, "19680505", None])  # 答对任意一个即可
         v.close()
         assert snapshot(target) == before
 
-    check("新建向导：选文件夹→密码→恢复密钥→首次上锁→数据完整", _wizard)
+    check("新建向导：选文件夹→6 位密码→3 个密保→首次上锁→数据完整", _wizard)
 
     _say("== 后台线程 ==")
 
@@ -574,10 +609,8 @@ def main() -> int:
         target = tmp / "密码管理"
         make_tree(target)
         v = Vault(target, audit_dir=cfg)
-        created = v.create(PASSWORD)
+        v.create(PASSWORD, QUESTIONS)
         v.close()
-        rec_key = created["recovery_key"]
-        from core.crypto import recovery_key_parse
 
         s = AppStore(cfg / "store11")
         s.add_vault(target)
@@ -586,7 +619,7 @@ def main() -> int:
         saved: list = []
         try:
             # 1) 修改密码：先输错原密码，再输对
-            change_answers = iter([("Wrong-Old-1", "NewPass2026a"), (PASSWORD, "NewPass2026a")])
+            change_answers = iter([("000000", "135790"), (PASSWORD, "135790")])
             change_errors: list = []
 
             def fake_change(parent, p, *, error=""):
@@ -597,54 +630,77 @@ def main() -> int:
             w.change_password(path)
             assert change_errors == ["", "原密码不对"], change_errors
             v = Vault(target, audit_dir=cfg)
-            v.verify(password="NewPass2026a")
+            v.verify(password="135790")
             v.close()
 
-            # 2) 忘记密码：用恢复密钥重置
-            reset_answers = iter([(recovery_key_parse(rec_key), "Reset2026Pass")])
-            _patch(mw.ResetPasswordDialog, "ask", staticmethod(lambda parent, p, *, error="": next(reset_answers)), saved)
-            assert w.reset_password(path) == "Reset2026Pass"
+            # 2) 忘记密码：先答错，再只答对一个，重置成新密码
+            reset_calls: list = []
+            reset_answers = iter(
+                [({"answers": ["2000-01-01", "", ""]}, "112233"), ({"answers": ["", "北京", ""]}, "112233")]
+            )
+
+            def fake_reset(parent, p, questions, *, error=""):
+                reset_calls.append((list(questions), error))
+                return next(reset_answers)
+
+            _patch(mw.ResetPasswordDialog, "ask", staticmethod(fake_reset), saved)
+            assert w.reset_password(path) == "112233"
+            assert reset_calls[0] == ([q for q, _a in QUESTIONS], "")
+            assert reset_calls[1][1] == "答案不对，再试一次", reset_calls
             v = Vault(target, audit_dir=cfg)
-            v.verify(password="Reset2026Pass")
+            v.verify(password="112233")
             v.close()
 
-            # 3) 换新恢复密钥：展示新密钥的对话框必须勾选才能关
-            shown: list = []
-            _patch(mw.PasswordDialog, "ask", staticmethod(lambda parent, p, **kw: ("Reset2026Pass", False)), saved)
-
-            class FakeKeyDialog:
-                def __init__(self, parent, key, fp):
-                    shown.append(key)
-
-                def exec(self):
-                    return 1
-
-            _patch(mw, "NewRecoveryKeyDialog", FakeKeyDialog, saved)
-            w.regenerate_recovery(path)
-            assert len(shown) == 1 and shown[0] != rec_key
+            # 3) 解锁时点「忘记密码」：答对一个就解锁，然后顺手设新密码
+            _patch(mw.PasswordDialog, "ask", staticmethod(lambda parent, p, **kw: (None, True)), saved)
+            _patch(mw.AnswersDialog, "ask", staticmethod(lambda parent, p, qs, **kw: [None, None, "1970/1/2"]), saved)
+            _patch(mw.NewPasswordDialog, "ask", staticmethod(lambda parent, p: "445566"), saved)
+            _patch(mw.QDesktopServices, "openUrl", staticmethod(lambda *_a: True), saved)
+            w.unlock_vault(path)
+            assert Vault(target).status()["state"] == C.UNLOCKED
+            w.lock_vault(path)  # 解锁时的密钥还在内存里，不用再输
+            assert Vault(target).status()["state"] == C.LOCKED
             v = Vault(target, audit_dir=cfg)
-            v.verify(recovery_key=recovery_key_parse(shown[0]))
+            v.verify(password="445566")
             v.close()
 
-            real = dl.NewRecoveryKeyDialog(None, shown[0], "fp")
+            # 4) 修改密保问题：要输当前密码；改完旧答案作废
+            q_calls: list = []
+            new_qs = [("我小时候的小名", "豆豆"), ("我第一只宠物的名字", "旺财"), ("父亲的生日", "1966-06-06")]
+            q_answers = iter([("000000", new_qs), ("445566", new_qs)])
+
+            def fake_questions(parent, p, current, *, legacy_key=False, error=""):
+                q_calls.append((list(current), legacy_key, error))
+                return next(q_answers)
+
+            _patch(mw.SecurityQuestionsDialog, "ask", staticmethod(fake_questions), saved)
+            w.set_questions(path)
+            assert q_calls[0] == ([q for q, _a in QUESTIONS], False, "")
+            assert q_calls[1][2] == "密码不对，再试一次"
+            assert Vault(target).status()["questions"] == [q for q, _a in new_qs]
+            v = Vault(target, audit_dir=cfg)
+            v.verify(answers=["", "旺财", ""])
+            v.close()
+
+            real = dl.SecurityQuestionsDialog(None, path, [q for q, _a in new_qs])
             real.show()
             assert not real.ok.isEnabled()
-            real.reject()
-            assert real.isVisible(), "没勾选「已抄好」就被关掉了"
-            real.check.setChecked(True)
+            real.pw.setText("445566")
+            for edit, (_q, a) in zip(real.editor.answers, new_qs):
+                edit.setText(a)
             assert real.ok.isEnabled()
-            real.accept()
+            real.reject()
 
             events = [r.get("event") for r in AuditLog(s.audit_path).records()]
-            for ev in ("CHANGE_PASSWORD", "RESET_BY_RECOVERY", "REGENERATE_RECOVERY"):
+            for ev in ("CHANGE_PASSWORD", "RESET_FAILED", "RESET_BY_QUESTIONS", "SET_QUESTIONS"):
                 assert ev in events, (ev, events[-10:])
-            assert dl._event_name("RESET_BY_RECOVERY") == "重置密码"
+            assert dl._event_name("RESET_BY_QUESTIONS") == "重置密码（密保）"
         finally:
             _restore(saved)
             w._quitting = True
             w.close()
 
-    check("修改密码 / 忘记密码重置 / 换恢复密钥", _password_management)
+    check("修改密码 / 忘记密码答密保重置 / 密保解锁 / 修改密保问题", _password_management)
 
     def _add_existing_and_skip():
         existing = tmp / "别人建的保险箱"

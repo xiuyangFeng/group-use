@@ -13,14 +13,14 @@ from core import protect
 from core.errors import IntegrityError, NotAVaultError
 from core.transform import HEADER as CHUNK_HEADER
 from core.vault import Vault
-from tests.conftest import PASSWORD, make_tree
+from tests.conftest import PASSWORD, QUESTIONS, make_tree
 
 
 def locked_vault(tmp_path, audit_dir):
     root = tmp_path / "data"
     make_tree(root)
     v = Vault(root, audit_dir=audit_dir)
-    v.create(PASSWORD)
+    v.create(PASSWORD, QUESTIONS)
     v.close()
     # 上锁后有防删除/改写保护；这里模拟「有权限的人绕过保护硬改」，看能不能查出来
     protect.release(root)
@@ -141,7 +141,7 @@ def test_second_instance_rejected(tmp_path, audit_dir):
     root = tmp_path / "data"
     make_tree(root)
     v = Vault(root, audit_dir=audit_dir)
-    v.create(PASSWORD)
+    v.create(PASSWORD, QUESTIONS)
     v.close()
 
     lock = VaultLock(root / ".vault" / "instance.lock")
@@ -169,7 +169,7 @@ def test_missing_manifest_blocks_unlock_and_verify(tmp_path, audit_dir):
     root = tmp_path / "data"
     make_tree(root)
     v = Vault(root, audit_dir=audit_dir)
-    v.create(PASSWORD)
+    v.create(PASSWORD, QUESTIONS)
     v.close()
 
     protect.release(root)  # 模拟绕过防删除保护
@@ -196,7 +196,7 @@ def test_manifest_rebuilt_on_lock_if_deleted_while_unlocked(tmp_path, audit_dir)
 
     before = snapshot(root)
     v = Vault(root, audit_dir=audit_dir)
-    v.create(PASSWORD)
+    v.create(PASSWORD, QUESTIONS)
     v.unlock(password=PASSWORD)
     for p in (root / ".vault").glob("manifest.db*"):
         p.unlink()

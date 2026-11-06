@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from tests.conftest import PASSWORD, make_tree, run_cli
+from tests.conftest import PASSWORD, QUESTIONS_STDIN, make_tree, run_cli
 
 
 def test_version_and_help():
@@ -35,7 +35,7 @@ def test_cli_survives_non_utf8_console(tmp_path, audit_dir):
     make_tree(root)
     r = run_cli(
         ["create", str(root), "--password-stdin", "--yes", "--no-progress"],
-        stdin=PASSWORD + "\n",
+        stdin=PASSWORD + "\n" + QUESTIONS_STDIN,
         audit_dir=audit_dir,
         env_extra=env,
     )
@@ -48,13 +48,13 @@ def test_create_json_and_status(tmp_path, audit_dir):
     make_tree(root)
     r = run_cli(
         ["create", str(root), "--password-stdin", "--yes", "--no-progress", "--json"],
-        stdin=PASSWORD + "\n",
+        stdin=PASSWORD + "\n" + QUESTIONS_STDIN,
         audit_dir=audit_dir,
     )
     assert r.returncode == 0, r.stderr
     data = json.loads(r.stdout)
     assert data["ok"] is True
-    assert len(data["recovery_key"].replace("-", "")) == 32
+    assert data["questions"] == ["我的生日", "我出生的城市", "母亲的生日"]
     assert data["files"] == 6
 
     r = run_cli(["status", str(root), "--json"], audit_dir=audit_dir)
@@ -68,7 +68,7 @@ def test_create_json_and_status(tmp_path, audit_dir):
 def test_cli_cycle(tmp_path, audit_dir):
     root = tmp_path / "data"
     make_tree(root)
-    assert run_cli(["create", str(root), "--password-stdin", "--yes", "--no-progress"], stdin=PASSWORD + "\n", audit_dir=audit_dir).returncode == 0
+    assert run_cli(["create", str(root), "--password-stdin", "--yes", "--no-progress"], stdin=PASSWORD + "\n" + QUESTIONS_STDIN, audit_dir=audit_dir).returncode == 0
     r = run_cli(["unlock", str(root), "--password-stdin", "--no-progress"], stdin=PASSWORD + "\n", audit_dir=audit_dir)
     assert r.returncode == 0, r.stderr
     r = run_cli(["verify", str(root), "--password-stdin", "--no-progress"], stdin=PASSWORD + "\n", audit_dir=audit_dir)
@@ -84,8 +84,8 @@ def test_cli_cycle(tmp_path, audit_dir):
 def test_cli_wrong_password_exit_3(tmp_path, audit_dir):
     root = tmp_path / "data"
     make_tree(root)
-    assert run_cli(["create", str(root), "--password-stdin", "--yes", "--no-progress"], stdin=PASSWORD + "\n", audit_dir=audit_dir).returncode == 0
-    r = run_cli(["unlock", str(root), "--password-stdin", "--no-progress"], stdin="wrong-password-000\n", audit_dir=audit_dir)
+    assert run_cli(["create", str(root), "--password-stdin", "--yes", "--no-progress"], stdin=PASSWORD + "\n" + QUESTIONS_STDIN, audit_dir=audit_dir).returncode == 0
+    r = run_cli(["unlock", str(root), "--password-stdin", "--no-progress"], stdin="000000\n", audit_dir=audit_dir)
     assert r.returncode == 3
     assert "密码不对" in r.stderr
 
@@ -101,7 +101,7 @@ def test_cli_not_a_vault(tmp_path, audit_dir):
 def test_cli_recovery_needed_exit_5(tmp_path, audit_dir):
     root = tmp_path / "data"
     make_tree(root)
-    assert run_cli(["create", str(root), "--password-stdin", "--yes", "--no-progress"], stdin=PASSWORD + "\n", audit_dir=audit_dir).returncode == 0
+    assert run_cli(["create", str(root), "--password-stdin", "--yes", "--no-progress"], stdin=PASSWORD + "\n" + QUESTIONS_STDIN, audit_dir=audit_dir).returncode == 0
     r = run_cli(
         ["unlock", str(root), "--password-stdin", "--no-progress"],
         stdin=PASSWORD + "\n",

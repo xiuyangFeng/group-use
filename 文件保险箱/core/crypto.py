@@ -79,7 +79,7 @@ def choose_kdf_params(target_seconds: float = 0.7) -> dict:
 # ---------------------------------------------------------------- KDF 密码检查
 
 def check_password_length(password: str) -> None:
-    # 长度检查由调用方决定（CLI/GUI 用 MIN_PASSWORD_LEN），这里只做最低限度的空值检查
+    # 长度检查由调用方决定（CLI/GUI 用 core.passwords），这里只做最低限度的空值检查
     if not password:
         raise PasswordError("密码不能为空")
 

@@ -33,7 +33,7 @@ from core import constants as C  # noqa: E402
 from core.vault import Vault  # noqa: E402
 from gui.main_window import MainWindow  # noqa: E402
 from gui.store import AppStore  # noqa: E402
-from tests.conftest import PASSWORD, make_tree  # noqa: E402
+from tests.conftest import PASSWORD, QUESTIONS, make_tree  # noqa: E402
 
 app = QApplication([])
 
@@ -53,7 +53,7 @@ def main() -> int:
     root = tmp / "数据"
     make_tree(root)
     v = Vault(root, audit_dir=tmp / "cfg")
-    v.create(PASSWORD)
+    v.create(PASSWORD, QUESTIONS)
     v.close()
 
     v = Vault(root, audit_dir=tmp / "cfg")
@@ -89,7 +89,7 @@ def main() -> int:
         root2 = tmp / "数据2"
         make_tree(root2)
         v2 = Vault(root2, audit_dir=tmp / "cfg")
-        v2.create(PASSWORD)
+        v2.create(PASSWORD, QUESTIONS)
         v2.close()
         v2 = Vault(root2, audit_dir=tmp / "cfg")
         v2.unlock(PASSWORD)

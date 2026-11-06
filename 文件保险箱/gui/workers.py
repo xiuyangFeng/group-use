@@ -21,7 +21,7 @@ class VaultOpWorker(QThread):
     failed = Signal(str, str)
     cancelled = Signal()
 
-    OPS = {"unlock", "lock", "initial_lock", "recover", "verify", "prepare"}
+    OPS = {"unlock", "lock", "initial_lock", "recover", "verify"}
 
     def __init__(
         self,
@@ -30,6 +30,7 @@ class VaultOpWorker(QThread):
         *,
         password: str | None = None,
         recovery_key: bytes | None = None,
+        answers: list[str] | None = None,
         rollback: bool = False,
         control: OperationControl | None = None,
         parent=None,
@@ -41,6 +42,7 @@ class VaultOpWorker(QThread):
         self.op = op
         self.password = password
         self.recovery_key = recovery_key
+        self.answers = answers
         self.rollback = rollback
         self.control = control or OperationControl()
 
@@ -53,30 +55,37 @@ class VaultOpWorker(QThread):
                 result = self.vault.unlock(
                     password=self.password,
                     recovery_key=self.recovery_key,
+                    answers=self.answers,
                     progress=self._progress,
                     control=self.control,
                 )
             elif self.op == "lock":
-                result = self.vault.lock(password=self.password, progress=self._progress, control=self.control)
+                result = self.vault.lock(
+                    password=self.password,
+                    recovery_key=self.recovery_key,
+                    answers=self.answers,
+                    progress=self._progress,
+                    control=self.control,
+                )
             elif self.op == "initial_lock":
                 result = self.vault.initial_lock(progress=self._progress, control=self.control)
             elif self.op == "recover":
                 result = self.vault.recover(
                     password=self.password,
                     recovery_key=self.recovery_key,
+                    answers=self.answers,
                     rollback=self.rollback,
                     progress=self._progress,
                     control=self.control,
                 )
-            elif self.op == "verify":
+            else:  # verify
                 result = self.vault.verify(
                     password=self.password,
                     recovery_key=self.recovery_key,
+                    answers=self.answers,
                     progress=self._progress,
                     control=self.control,
                 )
-            else:  # prepare
-                result = self.vault.prepare_new(self.password or "")
         except Cancelled:
             self.cancelled.emit()
         except VaultError as exc:

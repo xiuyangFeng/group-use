@@ -17,7 +17,11 @@ sys.path.insert(0, str(PROJECT))
 # GUI 测试一律走离屏渲染：不弹窗、不依赖屏幕，CI 也能跑
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-PASSWORD = "Test-Password-1234"
+PASSWORD = "246810"
+# 新建保险箱必须带 3 个密保问题；答对任意一个即可
+QUESTIONS = [("我的生日", "1998-03-12"), ("我出生的城市", "北京"), ("母亲的生日", "1970-01-02")]
+# CLI --password-stdin 时，密码后面跟 3 行「问题编号=答案」
+QUESTIONS_STDIN = "1=1998-03-12\n2=北京\n4=1970-01-02\n"
 
 # 测试（含它启动的子进程脚本）的审计日志 / 设置一律写到临时目录，不碰真实的
 # ~/Library/Application Support/文件保险箱（以前测试会往真实审计日志里写「创建保险箱」记录）

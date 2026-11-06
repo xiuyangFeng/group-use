@@ -1,7 +1,7 @@
 """文件保险箱命令行（M1 用；M2 的 GUI 直接调用 core，不经过这里）。
 
 用法见 `python -m cli.main --help`。
-退出码：0 成功 / 1 一般错误 / 2 用法错误 / 3 密码错误 / 4 恢复密钥错误 / 5 需要先恢复 / 6 磁盘空间不足
+退出码：0 成功 / 1 一般错误 / 2 用法错误 / 3 密码错误 / 4 密保答案或恢复密钥错误 / 5 需要先恢复 / 6 磁盘空间不足
 """
 
 from __future__ import annotations
@@ -18,9 +18,11 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core import __version__, constants as C, crypto, fsutil, passwords
+from core import questions as Q
 from core.console import setup_utf8_stdio
 from core.audit import AuditLog
 from core.errors import (
+    AnswerError,
     DiskSpaceError,
     PasswordError,
     RecoveryKeyError,
@@ -110,27 +112,103 @@ class ProgressPrinter:
             self._line_len = 0
 
 
-def print_recovery_key(recovery_key: str, fingerprint: str) -> None:
-    bar = "=" * 62
+def _read_line(reader: "SecretReader", prompt: str) -> str:
+    """密保答案不算机密到要隐藏输入（方便核对有没有打错）；自动化时从标准输入读。"""
+    if reader.use_stdin:
+        line = sys.stdin.readline()
+        if not line:
+            raise VaultError("标准输入里没有足够的行（--password-stdin）")
+        return line.rstrip("\r\n")
+    try:
+        return input(prompt)
+    except EOFError:
+        raise VaultError("输入被中断")
+
+
+def _resolve_question(text: str) -> str:
+    text = text.strip()
+    if text.isdigit() and 1 <= int(text) <= len(Q.PRESETS):
+        return Q.PRESETS[int(text) - 1][0]
+    return text
+
+
+def ask_questions(reader: "SecretReader") -> list[tuple[str, str]]:
+    """设 3 个密保问题。自动化（--password-stdin）时每行一个「问题编号或原文=答案」。"""
+    if reader.use_stdin:
+        pairs = []
+        for _ in range(Q.QUESTION_COUNT):
+            line = _read_line(reader, "")
+            q, sep, a = line.partition("=")
+            if not sep:
+                raise VaultError("密保问题要写成「问题编号=答案」，例如 1=1998-03-12")
+            pairs.append((_resolve_question(q), a))
+        return pairs
+
     print()
-    print(bar)
-    print("  恢复密钥（只显示这一次，请立刻抄下来）")
-    print()
-    print(f"    {recovery_key}")
-    print()
-    print(f"  指纹：{fingerprint}（以后可以用它核对是不是这张纸）")
-    print()
-    print("  用途：忘记密码时用它重置密码。没有它，密码丢了就真的打不开了。")
-    print("  建议：抄在纸上，你一份、导师一份；不要截图发微信/邮件。")
-    print(bar)
-    print()
+    print(f"设置 {Q.QUESTION_COUNT} 个密保问题（忘记密码时答对任意一个即可）。可选问题：")
+    for i, (q, _k) in enumerate(Q.PRESETS, 1):
+        print(f"  {i:>2}. {q}")
+    while True:
+        pairs = []
+        for n in range(1, Q.QUESTION_COUNT + 1):
+            while True:
+                q = _resolve_question(_read_line(reader, f"第 {n} 个问题（输入编号）："))
+                if q not in Q.PRESET_KINDS:
+                    print("  请输入上面列表里的编号。")
+                    continue
+                if q in [x for x, _ in pairs]:
+                    print("  这个问题已经选过了，换一个。")
+                    continue
+                break
+            while True:
+                a = _read_line(reader, f"  {q}（{Q.placeholder(q)}）：")
+                problem = Q.answer_problem(q, a)
+                if problem:
+                    print(f"  {problem}")
+                    continue
+                break
+            pairs.append((q, a))
+        problems = Q.questions_problems(pairs)
+        if not problems:
+            return pairs
+        print("密保问题不符合要求：" + "；".join(problems) + "，请重新设置。")
+
+
+def ask_answers(vault: Vault, reader: "SecretReader") -> list[str]:
+    """回答这个保险箱的密保问题；不会的直接回车跳过，答对一个即可。"""
+    texts = vault.header.question_texts
+    if not texts:
+        raise AnswerError("这个保险箱没有设置密保问题（旧版本建的，请用 --recovery-key）")
+    if not reader.use_stdin:
+        print("回答密保问题（答对任意一个即可，不会的直接回车跳过）：")
+    return [_read_line(reader, f"  {i}. {q}：") for i, q in enumerate(texts, 1)]
+
+
+def _read_recovery_key(reader: "SecretReader") -> bytes:
+    if reader.use_stdin:
+        line = sys.stdin.readline()
+        if not line:
+            raise VaultError("标准输入里没有恢复密钥")
+        text = line.strip()
+    else:
+        text = getpass.getpass("恢复密钥：").strip()
+    return crypto.recovery_key_parse(text)
+
+
+def credentials(args, vault: Vault, reader: "SecretReader") -> dict:
+    """按参数取凭据：默认密码；--forgot 答密保；--recovery-key 用旧版恢复密钥。"""
+    if getattr(args, "recovery_key", False):
+        return {"recovery_key": _read_recovery_key(reader)}
+    if getattr(args, "forgot", False):
+        return {"answers": ask_answers(vault, reader)}
+    return {"password": reader.ask("密码：")}
 
 
 def confirm_backup() -> bool:
     print("开始前请确认三件事：")
     print("  1. 这个文件夹里的重要数据已经另外备份过（移动硬盘 / 另一台电脑）；")
     print(f"  2. 密码是组里共用的：{passwords.password_rule_text()}；")
-    print("  3. 恢复密钥会显示一次，需要抄在纸上保存好。")
+    print("  3. 要设 3 个密保问题，忘记密码时答对任意一个即可找回。")
     try:
         ans = input("都确认了请输入 YES 继续（其它任意键退出）：").strip()
     except EOFError:
@@ -159,9 +237,11 @@ def cmd_create(args) -> int:
         f"设置密码（{passwords.password_rule_text()}）：",
         confirm=None if args.password_stdin else "再输一次：",
     )
+    passwords.validate_password(password)
+    pairs = ask_questions(reader)
     pp = ProgressPrinter(_progress_enabled(args))
     try:
-        result = vault.create(password, progress=pp)
+        result = vault.create(password, pairs, progress=pp)
     finally:
         pp.done()
 
@@ -170,8 +250,7 @@ def cmd_create(args) -> int:
         _json_dump(
             {
                 "ok": True,
-                "recovery_key": result["recovery_key"],
-                "recovery_fingerprint": result["recovery_fingerprint"],
+                "questions": result["questions"],
                 "files": stats["files"],
                 "bytes": stats["bytes"],
             }
@@ -183,8 +262,8 @@ def cmd_create(args) -> int:
     if stats.get("skipped"):
         print(f"  注意：跳过了 {len(stats['skipped'])} 个符号链接/特殊文件（不会加密它们）")
     print(f"  审计日志：{Path(args.audit_dir) / 'audit.jsonl' if args.audit_dir else fsutil.platform_data_dir() / 'audit.jsonl'}")
-    print_recovery_key(result["recovery_key"], result["recovery_fingerprint"])
-    print("把上面这串恢复密钥抄下来后，这个文件夹就可以交给同事了。")
+    print("  密保问题：" + " / ".join(result["questions"]))
+    print("  忘记密码时运行 reset-password，答对任意一个即可设新密码。")
     return EXIT["ok"]
 
 
@@ -200,18 +279,10 @@ def cmd_unlock(args) -> int:
     vault = _vault(args)
     _maybe_recovery_prompt(vault, args)
     reader = SecretReader(args.password_stdin)
+    cred = credentials(args, vault, reader)
     pp = ProgressPrinter(_progress_enabled(args))
     try:
-        if args.recovery_key:
-            if args.password_stdin:
-                line = sys.stdin.readline().rstrip("\r\n")
-            else:
-                line = getpass.getpass("恢复密钥：")
-            key = crypto.recovery_key_parse(line)
-            stats = vault.unlock(progress=pp, recovery_key=key)
-        else:
-            password = reader.ask("密码：")
-            stats = vault.unlock(password=password, progress=pp)
+        stats = vault.unlock(progress=pp, **cred)
     finally:
         pp.done()
     if args.json:
@@ -227,10 +298,10 @@ def cmd_lock(args) -> int:
     vault = _vault(args)
     _maybe_recovery_prompt(vault, args)
     reader = SecretReader(args.password_stdin)
-    password = reader.ask("密码：")
+    cred = credentials(args, vault, reader)
     pp = ProgressPrinter(_progress_enabled(args))
     try:
-        stats = vault.lock(password=password, progress=pp)
+        stats = vault.lock(progress=pp, **cred)
     finally:
         pp.done()
     if args.json:
@@ -253,7 +324,10 @@ def cmd_status(args) -> int:
     print(f"状态：  {STATE_LABEL.get(st['state'], st['state'])}")
     print(f"创建：  {st['created_at']}")
     print(f"内容：  {st['file_count']} 个文件 / {fsutil.human_bytes(st['total_bytes'])}")
-    print(f"恢复密钥指纹：{st['recovery_fingerprint']}")
+    if st["questions"]:
+        print("密保问题：" + " / ".join(st["questions"]))
+    else:
+        print(f"恢复密钥指纹：{st['recovery_fingerprint']}（旧版保险箱，建议运行 set-questions 设置密保问题）")
     if st["state"] == "LOCKED":
         if not st["protected"]:
             st["protected"] = vault.ensure_protected()
@@ -271,10 +345,10 @@ def cmd_verify(args) -> int:
     vault = _vault(args)
     _maybe_recovery_prompt(vault, args)
     reader = SecretReader(args.password_stdin)
-    password = reader.ask("密码：")
+    cred = credentials(args, vault, reader)
     pp = ProgressPrinter(_progress_enabled(args))
     try:
-        result = vault.verify(password=password, progress=pp)
+        result = vault.verify(progress=pp, **cred)
     finally:
         pp.done()
     if args.json:
@@ -307,10 +381,10 @@ def cmd_recover(args) -> int:
         rollback = False
 
     reader = SecretReader(args.password_stdin)
-    password = reader.ask("密码：")
+    cred = credentials(args, vault, reader)
     pp = ProgressPrinter(_progress_enabled(args))
     try:
-        result = vault.recover(password=password, progress=pp, rollback=rollback)
+        result = vault.recover(progress=pp, rollback=rollback, **cred)
     finally:
         pp.done()
     if args.json:
@@ -332,7 +406,7 @@ def cmd_change_password(args) -> int:
         confirm=None if args.password_stdin else "再输一次：",
     )
     vault.change_password(old, new)
-    print("✔ 密码已修改。恢复密钥没有变，仍然可以解锁。")
+    print("✔ 密码已修改。密保问题没有变，忘记密码时仍然可以用。")
     return EXIT["ok"]
 
 
@@ -340,34 +414,37 @@ def cmd_reset_password(args) -> int:
     vault = _vault(args)
     _maybe_recovery_prompt(vault, args)
     reader = SecretReader(args.password_stdin)
-    if args.password_stdin:
-        line = sys.stdin.readline()
-        if not line:
-            raise VaultError("标准输入里没有恢复密钥")
-        rec_text = line.strip()
+    use_key = args.recovery_key or not vault.header.question_texts
+    if use_key:
+        key = _read_recovery_key(reader)
     else:
-        rec_text = getpass.getpass("恢复密钥：").strip()
-    key = crypto.recovery_key_parse(rec_text)
+        answers = ask_answers(vault, reader)
     new = reader.ask(
         f"新密码（{passwords.password_rule_text()}）：",
         confirm=None if args.password_stdin else "再输一次：",
     )
-    vault.reset_with_recovery_key(key, new)
-    print("✔ 已用恢复密钥重置密码。之前的密码已失效，恢复密钥仍然有效。")
+    if use_key:
+        vault.reset_with_recovery_key(key, new)
+        print("✔ 已用恢复密钥重置密码。之前的密码已失效。建议再运行 set-questions 设置密保问题。")
+    else:
+        vault.reset_with_answers(answers, new)
+        print("✔ 密保答对了，密码已重置。之前的密码已失效，记得告诉组里同事。")
     return EXIT["ok"]
 
 
-def cmd_regenerate_recovery(args) -> int:
+def cmd_set_questions(args) -> int:
     vault = _vault(args)
     _maybe_recovery_prompt(vault, args)
     reader = SecretReader(args.password_stdin)
     password = reader.ask("密码：")
-    result = vault.regenerate_recovery_key(password)
+    pairs = ask_questions(reader)
+    result = vault.set_security_questions(password, pairs)
     if args.json:
         _json_dump(result)
         return EXIT["ok"]
-    print_recovery_key(result["recovery_key"], result["recovery_fingerprint"])
-    print("旧的恢复密钥已经作废，请把新的抄下来。")
+    print("✔ 密保问题已保存：" + " / ".join(result["questions"]))
+    if result["dropped_recovery_key"]:
+        print("  原来的恢复密钥已经作废，忘记密码请用密保问题找回。")
     return EXIT["ok"]
 
 
@@ -427,6 +504,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  查看状态        python -m cli.main status ~/Desktop/患者数据\n"
             "  完整性校验      python -m cli.main verify ~/Desktop/患者数据\n"
             "  中断后恢复      python -m cli.main recover ~/Desktop/患者数据\n"
+            "  忘记密码解锁    python -m cli.main unlock ~/Desktop/患者数据 --forgot\n"
+            "  忘记密码重置    python -m cli.main reset-password ~/Desktop/患者数据\n"
             "  审计日志        python -m cli.main audit --limit 20\n"
         ),
     )
@@ -449,13 +528,19 @@ def build_parser() -> argparse.ArgumentParser:
     common(sp)
     sp.set_defaults(func=cmd_create)
 
+    def cred_opts(sp):
+        g = sp.add_mutually_exclusive_group()
+        g.add_argument("--forgot", action="store_true", help="忘记密码：改为回答密保问题（答对一个即可）")
+        g.add_argument("--recovery-key", action="store_true", help="改用恢复密钥（只有旧版本建的保险箱有）")
+
     sp = sub.add_parser("unlock", help="解锁（原地恢复成普通文件夹）")
     common(sp)
-    sp.add_argument("--recovery-key", action="store_true", help="改用恢复密钥解锁")
+    cred_opts(sp)
     sp.set_defaults(func=cmd_unlock)
 
     sp = sub.add_parser("lock", help="上锁（原地加密，明文删除）")
     common(sp)
+    cred_opts(sp)
     sp.set_defaults(func=cmd_lock)
 
     sp = sub.add_parser("status", help="查看状态（不需要密码）")
@@ -464,24 +549,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("verify", help="校验密文完整性")
     common(sp)
+    cred_opts(sp)
     sp.set_defaults(func=cmd_verify)
 
     sp = sub.add_parser("recover", help="中断后继续或回滚")
     common(sp)
     sp.add_argument("--rollback", action="store_true", help="回滚到操作前的状态")
+    cred_opts(sp)
     sp.set_defaults(func=cmd_recover)
 
     sp = sub.add_parser("change-password", help="修改密码")
     common(sp)
     sp.set_defaults(func=cmd_change_password)
 
-    sp = sub.add_parser("reset-password", help="用恢复密钥重置密码")
+    sp = sub.add_parser("reset-password", help="忘记密码：答对一个密保问题后设新密码")
     common(sp)
+    sp.add_argument("--recovery-key", action="store_true", help="改用恢复密钥（只有旧版本建的保险箱有）")
     sp.set_defaults(func=cmd_reset_password)
 
-    sp = sub.add_parser("regenerate-recovery", help="重新生成恢复密钥（旧密钥作废）")
+    sp = sub.add_parser("set-questions", help="设置 / 修改 3 个密保问题（旧版保险箱的恢复密钥随之作废）")
     common(sp)
-    sp.set_defaults(func=cmd_regenerate_recovery)
+    sp.set_defaults(func=cmd_set_questions)
 
     sp = sub.add_parser("audit", help="查看 / 校验 / 导出审计日志")
     sp.add_argument("--verify", action="store_true", help="校验哈希链完整性")
@@ -505,6 +593,9 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT["password"]
     except RecoveryKeyError as exc:
         print(f"错误：{exc}。请检查恢复密钥是否抄错。", file=sys.stderr)
+        return EXIT["recovery"]
+    except AnswerError as exc:
+        print(f"错误：{exc}。可以换一个问题再试。", file=sys.stderr)
         return EXIT["recovery"]
     except RecoveryNeededError as exc:
         print(f"错误：{exc}。请先运行：python -m cli.main recover <文件夹>", file=sys.stderr)

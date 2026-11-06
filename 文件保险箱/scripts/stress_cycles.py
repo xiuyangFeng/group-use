@@ -29,7 +29,8 @@ from core.console import setup_utf8_stdio
 from core import constants as C  # noqa: E402
 from core.vault import Vault  # noqa: E402
 
-PASSWORD = "Stress-Cycles-Password-1234"
+PASSWORD = "246810"
+QUESTIONS = [("我的生日", "1998-03-12"), ("我出生的城市", "北京"), ("母亲的生日", "1970-01-02")]
 
 
 def make_files(root: Path) -> list[str]:
@@ -84,7 +85,7 @@ def main() -> int:
     extra_names = [m.encode() for m in markers if not m.startswith("SECRET-")]
 
     v = Vault(root, audit_dir=tmp / "audit")
-    v.create(PASSWORD)
+    v.create(PASSWORD, QUESTIONS)
     v.close()
 
     report = {

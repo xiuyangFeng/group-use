@@ -18,7 +18,11 @@ class PasswordError(VaultError):
 
 
 class RecoveryKeyError(VaultError):
-    """恢复密钥错误。"""
+    """恢复密钥错误（只有旧版本建的保险箱还有恢复密钥）。"""
+
+
+class AnswerError(VaultError):
+    """密保答案都不对。"""
 
 
 class VaultStateError(VaultError):

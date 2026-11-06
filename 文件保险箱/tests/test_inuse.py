@@ -11,14 +11,14 @@ from core import constants as C
 from core import inuse
 from core.errors import InUseError
 from core.vault import Vault
-from tests.conftest import PASSWORD, make_tree, snapshot
+from tests.conftest import PASSWORD, QUESTIONS, make_tree, snapshot
 
 
 def _unlocked_vault(tmp_path):
     root = tmp_path / "原始数据"
     make_tree(root)
     v = Vault(root, audit_dir=tmp_path / "audit")
-    v.create(PASSWORD)
+    v.create(PASSWORD, QUESTIONS)
     v.close()
     v = Vault(root, audit_dir=tmp_path / "audit")
     v.unlock(PASSWORD)

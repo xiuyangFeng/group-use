@@ -68,7 +68,7 @@ def run(out_dir: str | None = None) -> int:
         "里面包含：环境信息、设置文件、最近的界面日志、最近的审计记录。\n"
         "可能含有：保险箱所在的文件夹路径、你的系统账户名、操作时间。\n"
         "**发出去之前请自己看一眼**；如果路径里有敏感信息，可以只发 gui.log 的最后 40 行。\n\n"
-        "不含：密码、恢复密钥、保险箱里的文件内容。\n"
+        "不含：密码、密保答案、保险箱里的文件内容。\n"
     )
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("说明.txt", note)

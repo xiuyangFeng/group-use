@@ -1,4 +1,4 @@
-"""密码框、进度框、恢复、改密码 / 重置密码 / 新恢复密钥、设置、操作日志窗口。
+"""密码框、密保作答、进度框、恢复、改密码 / 重置密码 / 设密保问题、设置、操作日志窗口。
 
 弹窗统一一个样子：居中大图标 → 标题 → 输入 → 两个等宽大按钮（取消 / 主操作）。
 """
@@ -38,20 +38,20 @@ from core.errors import RecoveryKeyError
 
 from .store import AUTO_LOCK_CHOICES, AppStore, app_data_dir
 from .style import button, hero_header, hline, label, spacer
-from .widgets import PasswordPair, RecoveryKeyCard
+from .widgets import AnswerForm, PasswordPair, QuestionsEditor
 from .workers import VaultOpWorker
 
 DIALOG_USE_RECOVERY = 2
 
-# 这两种失败说明“输错了”，界面直接让用户重输，不弹报错框
-AUTH_ERRORS = {"PasswordError", "RecoveryKeyError"}
+# 这几种失败说明“输错了”，界面直接让用户重输，不弹报错框
+AUTH_ERRORS = {"PasswordError", "RecoveryKeyError", "AnswerError"}
 
 _ACTIONS = {
     # action: (图标, 标题模板, 主按钮)
     "unlock": ("locked", "解锁「{name}」", "解锁"),
     "lock": ("unlocked", "上锁「{name}」", "上锁"),
     "verify": ("locked", "校验「{name}」", "开始校验"),
-    "regen": ("key", "换新恢复密钥", "继续"),
+    "recover": ("warn", "恢复「{name}」", "开始恢复"),
 }
 
 
@@ -106,6 +106,7 @@ def _error_label(text: str = "") -> QLabel:
 
 
 def _key_input() -> QLineEdit:
+    """旧版本建的保险箱还有恢复密钥，忘记密码时仍可以用它。"""
     edit = QLineEdit()
     edit.setPlaceholderText("恢复密钥  XXXX-XXXX-…")
     edit.setProperty("mono", True)
@@ -145,8 +146,9 @@ class PasswordDialog(QDialog):
         if recovery:
             self.input = _key_input()
         else:
+            # 不限制成 6 位数字：旧版本建的保险箱还在用复杂密码
             self.input = QLineEdit()
-            self.input.setPlaceholderText("密码")
+            self.input.setPlaceholderText("密码（6 位数字）")
             self.input.setEchoMode(QLineEdit.Password)
         self.input.returnPressed.connect(self._submit)
         root.addWidget(self.input)
@@ -199,51 +201,148 @@ class PasswordDialog(QDialog):
         return dlg.recovery_key if dlg.exec() == QDialog.Accepted else None
 
 
-class ResetPasswordDialog(QDialog):
-    """忘记密码：恢复密钥 + 新密码。"""
+class AnswersDialog(QDialog):
+    """忘记密码：回答密保问题（答对任意一个即可）。"""
 
-    def __init__(self, parent=None, vault_path: str = "", *, error: str = ""):
+    def __init__(self, parent=None, vault_path: str = "", questions: list[str] | None = None, *, action: str = "unlock", error: str = ""):
         super().__init__(parent)
-        self.recovery_key: bytes | None = None
-        self.new_password = ""
+        self.answers: list[str] | None = None
         root = _base_layout(self, 420)
-        self.setWindowTitle("重置密码")
-        _hero(root, "key", "重置密码", f"「{_vault_name(vault_path)}」· 新密码对全组生效")
+        name = _vault_name(vault_path)
+        _kind, tpl, ok_text = _ACTIONS.get(action, _ACTIONS["unlock"])
+        title = tpl.format(name=name)
+        self.setWindowTitle(title)
+        _hero(root, "key", "回答密保问题", f"{title} · 答对任意一个即可")
 
-        self.key_input = _key_input()
-        root.addWidget(self.key_input)
-        self.pair = PasswordPair(self, first_placeholder="新密码")
+        self.form = AnswerForm(questions or [], self)
+        self.form.changed.connect(self._update)
+        root.addWidget(self.form)
+        for e in self.form.edits:
+            e.returnPressed.connect(self._submit)
+        self.error = _error_label(error)
+        root.addWidget(self.error)
+        self.ok = _buttons(root, ok_text, self._submit, self.reject)
+        self._update()
+        self.form.focus_first()
+
+    def _update(self) -> None:
+        self.ok.setEnabled(self.form.any_filled())
+
+    def _submit(self) -> None:
+        if not self.form.any_filled():
+            self.error.setText("至少回答一个问题")
+            self.error.show()
+            return
+        self.answers = self.form.answers()
+        self.accept()
+
+    @staticmethod
+    def ask(parent, vault_path: str, questions: list[str], *, action: str = "unlock", error: str = "") -> list[str] | None:
+        dlg = AnswersDialog(parent, vault_path, questions, action=action, error=error)
+        return dlg.answers if dlg.exec() == QDialog.Accepted else None
+
+
+class ResetPasswordDialog(QDialog):
+    """忘记密码：答对一个密保问题 + 设新密码。旧版本的保险箱没有密保，改用恢复密钥。"""
+
+    def __init__(self, parent=None, vault_path: str = "", questions: list[str] | None = None, *, error: str = ""):
+        super().__init__(parent)
+        self.questions = list(questions or [])
+        self.credential: dict | None = None
+        self.new_password = ""
+        root = _base_layout(self, 440)
+        self.setWindowTitle("重置密码")
+        if self.questions:
+            sub = f"「{_vault_name(vault_path)}」· 答对任意一个密保问题即可"
+        else:
+            sub = f"「{_vault_name(vault_path)}」· 旧版保险箱，用恢复密钥重置"
+        _hero(root, "key", "重置密码", sub)
+
+        self.form: AnswerForm | None = None
+        self.key_input: QLineEdit | None = None
+        if self.questions:
+            self.form = AnswerForm(self.questions, self)
+            self.form.changed.connect(self._update)
+            root.addWidget(self.form)
+            root.addSpacing(4)
+        else:
+            self.key_input = _key_input()
+            self.key_input.textChanged.connect(self._update)
+            root.addWidget(self.key_input)
+        root.addWidget(label("新密码对全组生效", role="muted"))
+        self.pair = PasswordPair(self, first_placeholder="新密码（6 位数字）")
         self.pair.changed.connect(self._update)
         root.addWidget(self.pair)
         self.error = _error_label(error)
         root.addWidget(self.error)
 
         self.ok = _buttons(root, "重置", self._submit, self.reject)
-        self.key_input.textChanged.connect(self._update)
         self._update()
-        self.key_input.setFocus()
+        if self.form is not None:
+            self.form.focus_first()
+        elif self.key_input is not None:
+            self.key_input.setFocus()
+
+    def _has_proof(self) -> bool:
+        if self.form is not None:
+            return self.form.any_filled()
+        return bool(self.key_input is not None and self.key_input.text().strip())
 
     def _update(self) -> None:
-        self.ok.setEnabled(bool(self.key_input.text().strip()) and self.pair.is_ok())
+        self.ok.setEnabled(self._has_proof() and self.pair.is_ok())
 
     def _submit(self) -> None:
         if not self.ok.isEnabled():
             return
-        try:
-            self.recovery_key = crypto.recovery_key_parse(self.key_input.text().strip())
-        except RecoveryKeyError as exc:
-            self.error.setText(f"恢复密钥格式不对：{exc}")
-            self.error.show()
-            return
+        if self.form is not None:
+            self.credential = {"answers": self.form.answers()}
+        else:
+            try:
+                self.credential = {"recovery_key": crypto.recovery_key_parse(self.key_input.text().strip())}
+            except RecoveryKeyError as exc:
+                self.error.setText(f"恢复密钥格式不对：{exc}")
+                self.error.show()
+                return
         self.new_password = self.pair.password()
         self.accept()
 
     @staticmethod
-    def ask(parent, vault_path: str, *, error: str = "") -> tuple[bytes, str] | None:
-        dlg = ResetPasswordDialog(parent, vault_path, error=error)
-        if dlg.exec() == QDialog.Accepted and dlg.recovery_key is not None:
-            return dlg.recovery_key, dlg.new_password
+    def ask(parent, vault_path: str, questions: list[str], *, error: str = "") -> tuple[dict, str] | None:
+        """返回 ({"answers": [...]} 或 {"recovery_key": bytes}, 新密码)；取消返回 None。"""
+        dlg = ResetPasswordDialog(parent, vault_path, questions, error=error)
+        if dlg.exec() == QDialog.Accepted and dlg.credential is not None:
+            return dlg.credential, dlg.new_password
         return None
+
+
+class NewPasswordDialog(QDialog):
+    """用密保解锁之后，顺手设一个新的 6 位密码（可以跳过）。"""
+
+    def __init__(self, parent=None, vault_path: str = ""):
+        super().__init__(parent)
+        self.new_password = ""
+        root = _base_layout(self, 400)
+        self.setWindowTitle("设置新密码")
+        _hero(root, "locked", "设置新密码", f"「{_vault_name(vault_path)}」已解锁。设个新密码，下次直接用它。")
+        self.pair = PasswordPair(self, first_placeholder="新密码（6 位数字）")
+        self.pair.changed.connect(self._update)
+        root.addWidget(self.pair)
+        self.ok = _buttons(root, "设置", self._submit, self.reject, cancel_text="以后再说")
+        self._update()
+        self.pair.pw1.setFocus()
+
+    def _update(self) -> None:
+        self.ok.setEnabled(self.pair.is_ok())
+
+    def _submit(self) -> None:
+        if self.pair.is_ok():
+            self.new_password = self.pair.password()
+            self.accept()
+
+    @staticmethod
+    def ask(parent, vault_path: str) -> str | None:
+        dlg = NewPasswordDialog(parent, vault_path)
+        return dlg.new_password if dlg.exec() == QDialog.Accepted else None
 
 
 class ChangePasswordDialog(QDialog):
@@ -259,7 +358,7 @@ class ChangePasswordDialog(QDialog):
         self.old.setEchoMode(QLineEdit.Password)
         self.old.setPlaceholderText("原密码")
         root.addWidget(self.old)
-        self.pair = PasswordPair(self, first_placeholder="新密码")
+        self.pair = PasswordPair(self, first_placeholder="新密码（6 位数字）")
         self.pair.changed.connect(self._update)
         root.addWidget(self.pair)
         self.error = _error_label(error)
@@ -292,35 +391,62 @@ class ChangePasswordDialog(QDialog):
         return None
 
 
-class NewRecoveryKeyDialog(QDialog):
-    """展示新生成的恢复密钥；必须勾选「已抄好」才能关。"""
+class SecurityQuestionsDialog(QDialog):
+    """设置 / 修改 3 个密保问题：先输当前密码。旧版保险箱设好后，原来的恢复密钥作废。"""
 
-    def __init__(self, parent=None, recovery_key: str = "", fingerprint: str = ""):
+    def __init__(
+        self,
+        parent=None,
+        vault_path: str = "",
+        current: list[str] | None = None,
+        *,
+        legacy_key: bool = False,
+        error: str = "",
+    ):
         super().__init__(parent)
-        root = _base_layout(self, 460)
-        self.setWindowTitle("新的恢复密钥")
-        _hero(root, "key", "新的恢复密钥", "旧的已作废。只显示这一次，请抄在纸上收好。")
-        card = RecoveryKeyCard(self)
-        card.set_key(recovery_key, fingerprint)
-        root.addWidget(card)
-        self.check = QCheckBox("我已抄好")
-        self.check.setCursor(Qt.PointingHandCursor)
-        root.addWidget(self.check, 0, Qt.AlignHCenter)
-        root.addSpacing(4)
-        self.ok = button("完成", kind="cta", on_click=self.accept)
-        self.ok.setEnabled(False)
-        root.addWidget(self.ok)
-        self.check.toggled.connect(self.ok.setEnabled)
+        self.password = ""
+        self.pairs: list[tuple[str, str]] = []
+        root = _base_layout(self, 520)
+        title = "修改密保问题" if current else "设置密保问题"
+        self.setWindowTitle(title)
+        if legacy_key:
+            sub = "设好后原来的恢复密钥作废，忘记密码改为答对任意一个问题。"
+        else:
+            sub = "忘记密码时，答对其中任意一个就能解锁。旧的问题和答案会作废。"
+        _hero(root, "key", title, f"「{_vault_name(vault_path)}」· {sub}", size=64)
 
-    def reject(self) -> None:
-        if self.check.isChecked():
-            super().reject()
+        self.pw = QLineEdit()
+        self.pw.setEchoMode(QLineEdit.Password)
+        self.pw.setPlaceholderText("当前密码")
+        self.pw.textChanged.connect(self._update)
+        root.addWidget(self.pw)
+        self.editor = QuestionsEditor(self, initial=current)
+        self.editor.changed.connect(self._update)
+        root.addWidget(self.editor)
+        self.error = _error_label(error)
+        root.addWidget(self.error)
+        self.ok = _buttons(root, "保存", self._submit, self.reject)
+        self._update()
+        self.pw.setFocus()
 
-    def closeEvent(self, event) -> None:  # noqa: N802
-        if not self.check.isChecked():
-            event.ignore()
+    def _update(self) -> None:
+        self.ok.setEnabled(bool(self.pw.text()) and self.editor.is_ok())
+
+    def _submit(self) -> None:
+        if not self.ok.isEnabled():
             return
-        super().closeEvent(event)
+        self.password = self.pw.text()
+        self.pairs = self.editor.pairs()
+        self.accept()
+
+    @staticmethod
+    def ask(
+        parent, vault_path: str, current: list[str], *, legacy_key: bool = False, error: str = ""
+    ) -> tuple[str, list[tuple[str, str]]] | None:
+        dlg = SecurityQuestionsDialog(parent, vault_path, current, legacy_key=legacy_key, error=error)
+        if dlg.exec() == QDialog.Accepted:
+            return dlg.password, dlg.pairs
+        return None
 
 
 # ================================================================ 进度对话框
@@ -789,7 +915,10 @@ _EVENT_NAMES = {
     "RECOVER": "恢复",
     "VERIFY": "完整性校验",
     "CHANGE_PASSWORD": "修改密码",
-    "RESET_BY_RECOVERY": "重置密码",
+    "RESET_BY_RECOVERY": "重置密码（恢复密钥）",
+    "RESET_BY_QUESTIONS": "重置密码（密保）",
+    "RESET_FAILED": "重置密码失败",
+    "SET_QUESTIONS": "设置密保问题",
     "RESET_PASSWORD": "重置密码",
     "REGENERATE_RECOVERY": "换恢复密钥",
 }

@@ -28,7 +28,8 @@ from core.console import setup_utf8_stdio
 from core.fsutil import human_bytes  # noqa: E402
 from core.vault import Vault  # noqa: E402
 
-PASSWORD = "Bench-Password-1234"
+PASSWORD = "246810"
+QUESTIONS = [("我的生日", "1998-03-12"), ("我出生的城市", "北京"), ("母亲的生日", "1970-01-02")]
 
 
 def make_files(root: Path, count: int, size: int) -> None:
@@ -76,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
 
     v = Vault(root, audit_dir=audit_dir)
     os.environ.setdefault("FDVAULT_CHUNK_SIZE", "65536")
-    t_create, res = timed(lambda: v.create(PASSWORD))
+    t_create, res = timed(lambda: v.create(PASSWORD, QUESTIONS))
     v.close()
     print(f"  创建保险箱（含首次上锁）：{t_create} 秒（{human_bytes(total_bytes / max(t_create, 0.01))}/s）")
 

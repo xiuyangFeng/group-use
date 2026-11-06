@@ -30,17 +30,19 @@ from PySide6.QtWidgets import (
 from core import constants as C, fsutil
 from core import inuse
 from core.control import OperationControl
-from core.errors import PasswordError, RecoveryKeyError, VaultError
+from core.errors import AnswerError, PasswordError, RecoveryKeyError, VaultError
 from core.vault import Vault
 
 from .dialogs import (
+    AnswersDialog,
     AuditWindow,
     ChangePasswordDialog,
-    NewRecoveryKeyDialog,
+    NewPasswordDialog,
     PasswordDialog,
     ProgressDialog,
     RecoveryDialog,
     ResetPasswordDialog,
+    SecurityQuestionsDialog,
     SettingsDialog,
 )
 from .quit_flow import quit_choices
@@ -187,8 +189,11 @@ class VaultCard(QWidget):
         if ref.get("last_unlock_at"):
             who = f"（{ref['last_unlock_by']}）" if ref.get("last_unlock_by") else ""
             lines.append(f"上次解锁：{ref['last_unlock_at']}{who}")
-        if self.info.get("recovery_fingerprint"):
-            lines.append(f"恢复密钥指纹：{self.info['recovery_fingerprint']}")
+        if self.info.get("questions"):
+            lines.append("密保问题：" + " / ".join(self.info["questions"]))
+        elif self.info.get("recovery_fingerprint"):
+            lines.append(f"旧版恢复密钥指纹：{self.info['recovery_fingerprint']}")
+            lines.append("建议在「•••」里设置密保问题")
         return "\n".join(lines)
 
     def _build_menu(self) -> QMenu:
@@ -199,7 +204,8 @@ class VaultCard(QWidget):
             m.addSeparator()
             m.addAction("修改密码…", lambda: self.main.change_password(self.info["path"]))
             m.addAction("忘记密码…", lambda: self.main.reset_password(self.info["path"]))
-            m.addAction("换新恢复密钥…", lambda: self.main.regenerate_recovery(self.info["path"]))
+            q_text = "修改密保问题…" if self.info.get("questions") else "设置密保问题…"
+            m.addAction(q_text, lambda: self.main.set_questions(self.info["path"]))
         if state == C.LOCKED:
             m.addAction("校验完整性…", lambda: self.main.verify_vault(self.info["path"]))
         m.addSeparator()
@@ -579,42 +585,64 @@ class MainWindow(QMainWindow):
     def _audit_dir(self) -> Path:
         return self.store.audit_path.parent
 
-    def _get_credentials(
-        self, path: str, action: str, *, error: str = "", note: str = ""
-    ) -> tuple[str | None, bytes | None] | None:
-        """弹密码框。返回 (密码, None) / (None, 恢复密钥) / None（取消）。
+    def _questions(self, path: str) -> list[str]:
+        try:
+            return list(Vault(path).header.question_texts)
+        except (VaultError, OSError):
+            return []
 
-        点「忘记密码」：解锁和换恢复密钥走「重置密码」（以后还要用密码），
-        其它操作直接用恢复密钥。
-        """
+    def _get_credentials(self, path: str, action: str, *, error: str = "", note: str = "") -> dict | None:
+        """弹密码框。返回 {"password"} / {"answers"} / {"recovery_key"} 之一，取消返回 None。"""
         password, forgot = PasswordDialog.ask(self, path, action=action, error=error, note=note)
         if password is not None:
-            return password, None
+            return {"password": password}
         if not forgot:
             return None
-        if action in ("unlock", "regen"):
+        return self._forgot_credentials(path, action)
+
+    def _forgot_credentials(self, path: str, action: str, *, error: str = "") -> dict | None:
+        """点了「忘记密码」：回答密保问题（答对一个即可）。
+
+        旧版本建的保险箱没有密保：解锁走「用恢复密钥重置密码」，其它操作直接用恢复密钥。"""
+        questions = self._questions(path)
+        if questions:
+            answers = AnswersDialog.ask(self, path, questions, action=action, error=error)
+            return {"answers": answers} if answers is not None else None
+        if action == "unlock":
             new_pw = self.reset_password(path)
-            return (new_pw, None) if new_pw else None
-        key = PasswordDialog.ask_recovery(self, path)
-        return (None, key) if key is not None else None
+            return {"password": new_pw} if new_pw else None
+        key = PasswordDialog.ask_recovery(self, path, error=error)
+        return {"recovery_key": key} if key is not None else None
+
+    @staticmethod
+    def _auth_error(cred: dict) -> str:
+        if "answers" in cred:
+            return "答案不对，再试一次"
+        if "recovery_key" in cred:
+            return "恢复密钥不对"
+        return "密码不对，再试一次"
 
     def _with_credentials(
         self,
         path: str,
         action: str,
-        run: Callable[[str | None, bytes | None], ProgressDialog | None],
+        run: Callable[[dict], ProgressDialog | None],
         *,
         note: str = "",
     ) -> ProgressDialog | None:
         error = ""
+        cred: dict | None = None
         while True:
-            cred = self._get_credentials(path, action, error=error, note=note)
+            if cred is not None and "answers" in cred:
+                # 密保答错了：直接再答，不用绕回密码框
+                cred = self._forgot_credentials(path, action, error=error)
+            else:
+                cred = self._get_credentials(path, action, error=error, note=note)
             if cred is None:
                 return None
-            password, key = cred
-            dlg = run(password, key)
+            dlg = run(cred)
             if dlg is not None and dlg.outcome == "auth_failed":
-                error = "恢复密钥不对" if key is not None else "密码不对，再试一次"
+                error = self._auth_error(cred)
                 continue
             return dlg
 
@@ -680,16 +708,24 @@ class MainWindow(QMainWindow):
         self._with_credentials(
             path,
             "unlock",
-            lambda pw, key: self._run_unlock(Vault(path, audit_dir=self._audit_dir()), password=pw, recovery_key=key),
+            lambda cred: self._run_unlock(Vault(path, audit_dir=self._audit_dir()), **cred),
         )
 
-    def _run_unlock(self, vault: Vault, *, password: str | None = None, recovery_key: bytes | None = None) -> ProgressDialog:
+    def _run_unlock(
+        self,
+        vault: Vault,
+        *,
+        password: str | None = None,
+        recovery_key: bytes | None = None,
+        answers: list[str] | None = None,
+    ) -> ProgressDialog:
         path = str(vault.root)
         control = OperationControl()
-        worker = VaultOpWorker(vault, "unlock", password=password, recovery_key=recovery_key, control=control, parent=self)
+        cred = {"password": password, "recovery_key": recovery_key, "answers": answers}
+        worker = VaultOpWorker(vault, "unlock", **cred, control=control, parent=self)
 
         def rollback() -> VaultOpWorker:
-            return VaultOpWorker(vault, "recover", password=password, recovery_key=recovery_key, rollback=True, parent=self)
+            return VaultOpWorker(vault, "recover", **cred, rollback=True, parent=self)
 
         dlg = self._progress(f"正在解锁「{_name(path)}」", worker, control, on_rollback=rollback)
         if dlg.outcome == "ok":
@@ -697,6 +733,8 @@ class MainWindow(QMainWindow):
             self.sessions[path] = vault
             self.store.touch_unlock(path, getpass.getuser())
             self._refresh()
+            if answers is not None:
+                self._offer_new_password(path, answers)
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
         else:
             vault.close()
@@ -717,7 +755,7 @@ class MainWindow(QMainWindow):
         self._with_credentials(
             path,
             "lock",
-            lambda pw, key: self._run_lock(Vault(path, audit_dir=self._audit_dir()), password=pw, recovery_key=key),
+            lambda cred: self._run_lock(Vault(path, audit_dir=self._audit_dir()), **cred),
             note="程序重启过，需要再输一次密码。",
         )
 
@@ -727,14 +765,16 @@ class MainWindow(QMainWindow):
         *,
         password: str | None = None,
         recovery_key: bytes | None = None,
+        answers: list[str] | None = None,
         auto: bool = False,
     ) -> ProgressDialog:
         path = self._session_path(vault)
         control = OperationControl()
-        worker = VaultOpWorker(vault, "lock", password=password, recovery_key=recovery_key, control=control, parent=self)
+        cred = {"password": password, "recovery_key": recovery_key, "answers": answers}
+        worker = VaultOpWorker(vault, "lock", **cred, control=control, parent=self)
 
         def rollback() -> VaultOpWorker:
-            return VaultOpWorker(vault, "recover", password=password, recovery_key=recovery_key, rollback=True, parent=self)
+            return VaultOpWorker(vault, "recover", **cred, rollback=True, parent=self)
 
         dlg = self._progress(f"正在上锁「{_name(path)}」", worker, control, on_rollback=rollback)
         self._finish_lock(path, vault, dlg.outcome)
@@ -782,24 +822,31 @@ class MainWindow(QMainWindow):
             self._refresh()
             return
         error = ""
+        retry_forgot = False
+        rollback = False
         while True:
-            password, rollback, use_key = RecoveryDialog.ask(self, path, _state_text(info["state"]), error=error)
-            key = None
-            if use_key:
-                key = PasswordDialog.ask_recovery(self, path)
-                if key is None:
+            if retry_forgot:
+                cred = self._forgot_credentials(path, "recover", error=error)
+                if cred is None:
                     return
-            elif password is None:
-                return
+            else:
+                password, rollback, forgot = RecoveryDialog.ask(self, path, _state_text(info["state"]), error=error)
+                if forgot:
+                    cred = self._forgot_credentials(path, "recover")
+                    if cred is None:
+                        return
+                elif password is None:
+                    return
+                else:
+                    cred = {"password": password}
             vault = Vault(path, audit_dir=self._audit_dir())
             control = OperationControl()
-            worker = VaultOpWorker(
-                vault, "recover", password=password, recovery_key=key, rollback=rollback, control=control, parent=self
-            )
+            worker = VaultOpWorker(vault, "recover", **cred, rollback=rollback, control=control, parent=self)
             dlg = self._progress(f"正在恢复「{_name(path)}」", worker, control)
             vault.close()
             if dlg.outcome == "auth_failed":
-                error = "恢复密钥不对" if key is not None else "密码不对，再试一次"
+                error = self._auth_error(cred)
+                retry_forgot = "password" not in cred
                 continue
             if dlg.outcome == "ok":
                 self._notify("恢复完成", f"「{_name(path)}」已恢复。")
@@ -813,10 +860,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "先上锁", "上锁状态下才能校验。")
             return
 
-        def run(password: str | None, key: bytes | None) -> ProgressDialog:
+        def run(cred: dict) -> ProgressDialog:
             vault = Vault(path, audit_dir=self._audit_dir())
             control = OperationControl()
-            worker = VaultOpWorker(vault, "verify", password=password, recovery_key=key, control=control, parent=self)
+            worker = VaultOpWorker(vault, "verify", **cred, control=control, parent=self)
             dlg = self._progress(f"正在校验「{_name(path)}」", worker, control)
             vault.close()
             return dlg
@@ -832,7 +879,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "发现问题", f"{len(problems)} 个文件有问题，请从备份恢复：\n\n{lines}")
         self._refresh()
 
-    # ---------------------------------------------------------------- 密码 / 恢复密钥
+    # ---------------------------------------------------------------- 密码 / 密保问题
 
     def _quick(self, fn: Callable[[], object]) -> object:
         """短操作（只算一次密钥，约 1 秒）：转圈光标，不开进度框。"""
@@ -843,20 +890,24 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
     def reset_password(self, path: str) -> str | None:
-        """用恢复密钥设新密码；成功返回新密码。"""
+        """忘记密码：答对一个密保问题（旧版保险箱用恢复密钥），设新密码；成功返回新密码。"""
         if self._busy:
             return None
+        questions = self._questions(path)
         error = ""
         while True:
-            got = ResetPasswordDialog.ask(self, path, error=error)
+            got = ResetPasswordDialog.ask(self, path, questions, error=error)
             if got is None:
                 return None
-            key, new_pw = got
+            cred, new_pw = got
             vault = Vault(path, audit_dir=self._audit_dir())
             try:
-                self._quick(lambda: vault.reset_with_recovery_key(key, new_pw))
-            except RecoveryKeyError:
-                error = "恢复密钥不对"
+                if "answers" in cred:
+                    self._quick(lambda: vault.reset_with_answers(cred["answers"], new_pw))
+                else:
+                    self._quick(lambda: vault.reset_with_recovery_key(cred["recovery_key"], new_pw))
+            except (AnswerError, RecoveryKeyError):
+                error = self._auth_error(cred)
                 continue
             except VaultError as exc:
                 QMessageBox.critical(self, "没能重置", str(exc))
@@ -865,6 +916,21 @@ class MainWindow(QMainWindow):
                 vault.close()
             self._notify("密码已重置", "记得把新密码告诉组里同事。")
             return new_pw
+
+    def _offer_new_password(self, path: str, answers: list[str]) -> None:
+        """刚用密保解锁：顺手设个新密码（可以跳过，下次还能用密保）。"""
+        new_pw = NewPasswordDialog.ask(self, path)
+        if not new_pw:
+            return
+        vault = Vault(path, audit_dir=self._audit_dir())
+        try:
+            self._quick(lambda: vault.reset_with_answers(answers, new_pw))
+        except VaultError as exc:
+            QMessageBox.warning(self, "没能设置新密码", str(exc))
+            return
+        finally:
+            vault.close()
+        self._notify("新密码已设置", "记得把新密码告诉组里同事。")
 
     def change_password(self, path: str) -> None:
         if self._busy:
@@ -889,27 +955,34 @@ class MainWindow(QMainWindow):
             self._notify("密码已修改", "记得把新密码告诉组里同事。")
             return
 
-    def regenerate_recovery(self, path: str) -> None:
+    def set_questions(self, path: str) -> None:
+        """设置 / 修改 3 个密保问题（要输当前密码）。"""
         if self._busy:
             return
+        try:
+            header = Vault(path).header
+        except (VaultError, OSError) as exc:
+            QMessageBox.critical(self, "打不开这个保险箱", str(exc))
+            return
+        current, legacy = list(header.question_texts), header.has_recovery_key
         error = ""
         while True:
-            cred = self._get_credentials(path, "regen", error=error, note="旧的恢复密钥会作废。")
-            if cred is None or cred[0] is None:
+            got = SecurityQuestionsDialog.ask(self, path, current, legacy_key=legacy, error=error)
+            if got is None:
                 return
-            password = cred[0]
+            password, pairs = got
             vault = Vault(path, audit_dir=self._audit_dir())
             try:
-                result = self._quick(lambda: vault.regenerate_recovery_key(password))
+                self._quick(lambda: vault.set_security_questions(password, pairs))
             except PasswordError:
                 error = "密码不对，再试一次"
                 continue
             except VaultError as exc:
-                QMessageBox.critical(self, "没能生成", str(exc))
+                QMessageBox.critical(self, "没能保存", str(exc))
                 return
             finally:
                 vault.close()
-            NewRecoveryKeyDialog(self, result["recovery_key"], result["recovery_fingerprint"]).exec()
+            self._notify("密保问题已保存", "忘记密码时答对任意一个即可。")
             self._refresh()
             return
 

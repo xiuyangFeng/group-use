@@ -27,7 +27,7 @@ os.environ.setdefault("FDVAULT_NO_PROTECT", "1")  # 临时目录里的保险箱�
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
-from tests.conftest import PASSWORD, make_tree, snapshot  # noqa: E402  (需要先设置 sys.path)
+from tests.conftest import PASSWORD, QUESTIONS_STDIN, make_tree, snapshot  # noqa: E402  (需要先设置 sys.path)
 from core.console import setup_utf8_stdio  # noqa: E402
 
 MARKER = b"STRESS-PLAINTEXT-MARKER-DO-NOT-LEAK"
@@ -138,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     rng = random.Random(args.seed)
     runner = Runner(root, audit_dir, python)
 
-    r = runner.run(["create", str(root), "--password-stdin", "--yes", "--no-progress"])
+    r = runner.run(["create", str(root), "--password-stdin", "--yes", "--no-progress"], stdin=PASSWORD + "\n" + QUESTIONS_STDIN)
     assert r.returncode == 0, r.stderr
     assert runner.state() == STATE_LOCKED
 

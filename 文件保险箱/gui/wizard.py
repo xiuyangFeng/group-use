@@ -1,4 +1,4 @@
-"""新建保险箱向导：选文件夹 → 设密码 → 抄恢复密钥 → 首次上锁。
+"""新建保险箱向导：选文件夹 → 设 6 位数字密码 → 设 3 个密保问题 → 首次上锁。
 
 从主窗口进来时文件夹已经选好（按钮先弹选择框 / 拖进来 / 右键菜单），
 这时直接从「设密码」开始，少一步。
@@ -11,7 +11,6 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QFileDialog,
     QHBoxLayout,
     QLineEdit,
@@ -29,7 +28,7 @@ from core.vault import Vault
 
 from .store import AppStore
 from .style import GREEN, MUTED, RED, button, hero_header, label
-from .widgets import PasswordPair, RecoveryKeyCard
+from .widgets import PasswordPair, QuestionsEditor
 from .workers import VaultOpWorker
 
 
@@ -109,11 +108,11 @@ class PasswordPage(QWizardPage):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 8, 24, 4)
         lay.setSpacing(12)
-        head, _t, self.folder_label = hero_header("locked", "设置密码", " ")
+        head, _t, self.folder_label = hero_header("locked", "设置 6 位数字密码", " ")
         lay.addWidget(head)
         lay.addSpacing(4)
 
-        self.pair = PasswordPair(self, first_placeholder="组内共用密码")
+        self.pair = PasswordPair(self, first_placeholder="组内共用密码（6 位数字）")
         self.pair.changed.connect(self.completeChanged.emit)
         lay.addWidget(self.pair)
         # 兼容旧代码 / 自检脚本直接访问
@@ -138,16 +137,50 @@ class PasswordPage(QWizardPage):
 
     def nextId(self) -> int:  # noqa: N802
         # Qt 会随时调用 nextId 来更新按钮状态，这里不能做耗时操作或弹窗。
-        return self.wiz.PAGE_RECOVERY
+        return self.wiz.PAGE_QUESTIONS
 
     def validatePage(self) -> bool:  # noqa: N802
         # 不满足条件时只返回 False（下一步按钮本来就是灰的），不弹窗：
         # Qt 在程序化切页时也会调 validatePage，弹窗会阻塞自动化测试。
-        if not self._ok():
+        return self._ok()
+
+
+class QuestionsPage(QWizardPage):
+    """设 3 个密保问题。点「开始上锁」才真正生成密钥、开始加密，之后不能返回。"""
+
+    def __init__(self, wiz: "CreateWizard"):
+        super().__init__()
+        self.wiz = wiz
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 8, 24, 4)
+        lay.setSpacing(10)
+        head, _t, _s = hero_header(
+            "key", "设置 3 个密保问题", "忘记密码时，答对其中任意一个就能解锁并重设密码。", size=64
+        )
+        lay.addWidget(head)
+        self.editor = QuestionsEditor(self)
+        self.editor.changed.connect(self.completeChanged.emit)
+        lay.addWidget(self.editor)
+        lay.addStretch(1)
+        note = label("答案请如实填写并记住；不区分大小写，空格和标点会被忽略。", role="muted", wrap=True)
+        note.setAlignment(Qt.AlignCenter)
+        lay.addWidget(note)
+
+    def initializePage(self) -> None:  # noqa: N802
+        self.editor.answers[0].setFocus()
+
+    def isComplete(self) -> bool:  # noqa: N802
+        return self.editor.is_ok()
+
+    def nextId(self) -> int:  # noqa: N802
+        return self.wiz.PAGE_PROGRESS
+
+    def validatePage(self) -> bool:  # noqa: N802
+        if not self.editor.is_ok():
             return False
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
-            self.wiz.prepare(self.pw1.text())
+            self.wiz.prepare(self.wiz.page_password.pw1.text(), self.editor.pairs())
         except VaultError as exc:
             QMessageBox.critical(self, "无法创建保险箱", str(exc))
             return False
@@ -157,38 +190,6 @@ class PasswordPage(QWizardPage):
         finally:
             QApplication.restoreOverrideCursor()
         return True
-
-
-class RecoveryPage(QWizardPage):
-    def __init__(self, wiz: "CreateWizard"):
-        super().__init__()
-        self.wiz = wiz
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 8, 24, 4)
-        lay.setSpacing(12)
-        head, _t, _s = hero_header("key", "抄下恢复密钥", "忘记密码时靠它找回。只显示这一次，请抄在纸上收好。")
-        lay.addWidget(head)
-        lay.addSpacing(4)
-        self.card = RecoveryKeyCard(self)
-        lay.addWidget(self.card)
-        self.key_label, self.fp_label = self.card.key_label, self.card.fp_label
-
-        self.check = QCheckBox("我已抄好")
-        self.check.setCursor(Qt.PointingHandCursor)
-        self.check.stateChanged.connect(lambda _s: self.completeChanged.emit())
-        lay.addWidget(self.check, 0, Qt.AlignHCenter)
-        lay.addStretch(1)
-
-    def initializePage(self) -> None:  # noqa: N802
-        prepared = self.wiz.prepared or {}
-        self.card.set_key(prepared.get("recovery_key", ""), prepared.get("recovery_fingerprint", ""))
-        self.check.setChecked(False)
-
-    def isComplete(self) -> bool:  # noqa: N802
-        return self.check.isChecked()
-
-    def nextId(self) -> int:  # noqa: N802
-        return self.wiz.PAGE_PROGRESS
 
 
 class ProgressPage(QWizardPage):
@@ -260,7 +261,7 @@ class ProgressPage(QWizardPage):
 class CreateWizard(QWizard):
     PAGE_FOLDER = 0
     PAGE_PASSWORD = 1
-    PAGE_RECOVERY = 2
+    PAGE_QUESTIONS = 2
     PAGE_PROGRESS = 3
 
     def __init__(self, parent=None, store: AppStore | None = None, audit_dir=None, initial_path: str | None = None):
@@ -272,7 +273,6 @@ class CreateWizard(QWizard):
         self.prepared: dict | None = None
         self.prepared_password = ""
         self.created = False
-        self.recovery_key = ""
         self.control: OperationControl | None = None
         self.worker: VaultOpWorker | None = None
 
@@ -280,7 +280,7 @@ class CreateWizard(QWizard):
         self.setWizardStyle(QWizard.ClassicStyle)
         self.setOption(QWizard.NoBackButtonOnStartPage, True)
         self.setOption(QWizard.HaveHelpButton, False)
-        self.resize(520, 500)
+        self.resize(560, 540)
         self.setButtonText(QWizard.NextButton, "下一步")
         self.setButtonText(QWizard.BackButton, "上一步")
         self.setButtonText(QWizard.CancelButton, "取消")
@@ -289,13 +289,13 @@ class CreateWizard(QWizard):
 
         self.page_folder = FolderPage(self)
         self.page_password = PasswordPage(self)
-        self.page_recovery = RecoveryPage(self)
+        self.page_questions = QuestionsPage(self)
         self.page_progress = ProgressPage(self)
-        # 抄完恢复密钥这一步一旦点下去就开始加密，不能再返回
-        self.page_recovery.setCommitPage(True)
+        # 设好密保这一步一旦点下去就开始加密，不能再返回
+        self.page_questions.setCommitPage(True)
         self.setPage(self.PAGE_FOLDER, self.page_folder)
         self.setPage(self.PAGE_PASSWORD, self.page_password)
-        self.setPage(self.PAGE_RECOVERY, self.page_recovery)
+        self.setPage(self.PAGE_QUESTIONS, self.page_questions)
         self.setPage(self.PAGE_PROGRESS, self.page_progress)
         if initial_path:
             self.page_folder.path_edit.setText(str(initial_path))
@@ -314,11 +314,11 @@ class CreateWizard(QWizard):
 
     # ---------------------------------------------------------------- 准备
 
-    def prepare(self, password: str) -> None:
+    def prepare(self, password: str, questions: list[tuple[str, str]]) -> None:
         if self.prepared is not None:
             self._abort_prepared()
         self.vault = Vault(self.target, audit_dir=self.audit_dir)
-        self.prepared = self.vault.prepare_new(password)
+        self.prepared = self.vault.prepare_new(password, questions)
         self.prepared_password = password
 
     def _abort_prepared(self) -> None:
@@ -347,7 +347,6 @@ class CreateWizard(QWizard):
 
     def _created(self, page: ProgressPage) -> None:
         self.created = True
-        self.recovery_key = (self.prepared or {}).get("recovery_key", "")
         page.finish_ok()
         self._set_buttons_locked(False)
         self.button(QWizard.CancelButton).hide()

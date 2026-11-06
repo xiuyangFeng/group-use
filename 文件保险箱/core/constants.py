@@ -4,7 +4,10 @@
 """
 
 FORMAT = "fdv1"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+# 版本 2：用密保问题代替恢复密钥。还带着恢复密钥、没有密保问题的 header 仍写成版本 1，
+# 这样旧版软件也能继续打开没升级过的保险箱。
+FORMAT_VERSION_LEGACY = 1
 
 # 保险箱内部目录（位于用户选择的文件夹根目录下）
 VAULT_DIRNAME = ".vault"
@@ -25,7 +28,7 @@ MARKER_TEXT = """这个文件夹已经用「文件保险箱」上锁。
 需要用的时候：
 1. 打开「文件保险箱」软件；
 2. 选中这个文件夹；
-3. 输入密码解锁（或点「用恢复密钥解锁」）。
+3. 输入 6 位数字密码解锁（忘了就点「忘记密码？」，答对一个密保问题即可）。
 
 如果你不是这个文件夹的主人，请联系它的主人，不要尝试删除或移动里面的东西。
 """
@@ -39,7 +42,7 @@ INUSE_CLOCK_SKEW_SECONDS = 60
 TMP_SUFFIXES = (".fdv-part", ".fdv-tmp")
 
 DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024  # 4 MiB
-MIN_PASSWORD_LEN = 8
+PASSWORD_LEN = 6  # 新密码：正好 6 位数字
 
 # 磁盘空间预留
 SPACE_RESERVE_BYTES = 32 * 1024 * 1024

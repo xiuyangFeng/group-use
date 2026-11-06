@@ -1,14 +1,16 @@
-"""几个界面里共用的小部件：新密码输入、恢复密钥卡片、拖放区。"""
+"""几个界面里共用的小部件：6 位数字密码输入、密保问题编辑 / 作答、拖放区。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPainter
+from PySide6.QtCore import QRegularExpression, Qt, Signal
+from PySide6.QtGui import QPainter, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -17,12 +19,25 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core import constants as C
 from core import passwords
+from core import questions as Q
 
 from .style import GREEN, MUTED, RED, button, hero_header, label, repolish
 
 # 规则的短写法（完整文案在 core.passwords，CLI 用）
-_SHORT_RULES = ("8 位以上", "数字", "大写字母", "小写字母")
+_SHORT_RULES = (f"{C.PASSWORD_LEN} 位", "纯数字")
+
+
+def pin_edit(placeholder: str) -> QLineEdit:
+    """只能输数字、最多 6 位的密码框（新密码用；输旧密码的框不限制，兼容旧版本的复杂密码）。"""
+    edit = QLineEdit()
+    edit.setEchoMode(QLineEdit.Password)
+    edit.setPlaceholderText(placeholder)
+    edit.setMaxLength(C.PASSWORD_LEN)
+    edit.setValidator(QRegularExpressionValidator(QRegularExpression(rf"\d{{0,{C.PASSWORD_LEN}}}"), edit))
+    edit.setInputMethodHints(Qt.ImhDigitsOnly)
+    return edit
 
 
 class PasswordPair(QWidget):
@@ -36,15 +51,11 @@ class PasswordPair(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
 
-        self.pw1 = QLineEdit()
-        self.pw1.setEchoMode(QLineEdit.Password)
-        self.pw1.setPlaceholderText(first_placeholder)
+        self.pw1 = pin_edit(first_placeholder)
         self.pw1.textChanged.connect(self._changed)
         lay.addWidget(self.pw1)
 
-        self.pw2 = QLineEdit()
-        self.pw2.setEchoMode(QLineEdit.Password)
-        self.pw2.setPlaceholderText("再输一遍")
+        self.pw2 = pin_edit("再输一遍")
         self.pw2.textChanged.connect(self._changed)
         lay.addWidget(self.pw2)
 
@@ -104,29 +115,116 @@ class PasswordPair(QWidget):
         self.pw2.clear()
 
 
-class RecoveryKeyCard(QFrame):
-    """大号显示恢复密钥（两行，每行 4 组）+ 指纹。"""
+class QuestionsEditor(QWidget):
+    """设 3 个密保问题：每行一个下拉框（预设问题，三个不能重复）+ 答案输入。"""
 
-    def __init__(self, parent=None):
+    changed = Signal()
+
+    def __init__(self, parent=None, *, initial: list[str] | None = None):
         super().__init__(parent)
-        self.setProperty("keycard", True)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(18, 18, 18, 14)
-        lay.setSpacing(8)
-        self.key_label = label("", role="bigkey")
-        self.key_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.key_label.setAlignment(Qt.AlignCenter)
-        lay.addWidget(self.key_label)
-        self.fp_label = label("", role="muted")
-        self.fp_label.setAlignment(Qt.AlignCenter)
-        lay.addWidget(self.fp_label)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
 
-    def set_key(self, key: str, fingerprint: str) -> None:
-        groups = [g for g in key.split("-") if g]
-        if len(groups) == 8:
-            key = "-".join(groups[:4]) + "\n" + "-".join(groups[4:])
-        self.key_label.setText(key)
-        self.fp_label.setText(f"指纹 {fingerprint}" if fingerprint else "")
+        texts = [q for q, _k in Q.PRESETS]
+        chosen = list(initial or [])
+        for q in texts:
+            if len(chosen) >= Q.QUESTION_COUNT:
+                break
+            if q not in chosen:
+                chosen.append(q)
+
+        self.combos: list[QComboBox] = []
+        self.answers: list[QLineEdit] = []
+        for i in range(Q.QUESTION_COUNT):
+            grid.addWidget(label(f"{i + 1}.", role="muted"), i, 0)
+            combo = QComboBox()
+            combo.addItems(texts)
+            if chosen[i] not in texts:
+                combo.addItem(chosen[i])
+            combo.setCurrentText(chosen[i])
+            combo.currentTextChanged.connect(self._question_changed)
+            grid.addWidget(combo, i, 1)
+            edit = QLineEdit()
+            edit.textChanged.connect(self._changed)
+            grid.addWidget(edit, i, 2)
+            self.combos.append(combo)
+            self.answers.append(edit)
+        lay.addLayout(grid)
+
+        self.hint = QLabel()
+        self.hint.setProperty("role", "chip")
+        self.hint.setTextFormat(Qt.RichText)
+        self.hint.setWordWrap(True)
+        self.hint.setMinimumHeight(18)
+        lay.addWidget(self.hint)
+        self._question_changed()
+
+    def _question_changed(self, _text: str = "") -> None:
+        picked = [c.currentText() for c in self.combos]
+        for i, combo in enumerate(self.combos):
+            others = set(picked[:i] + picked[i + 1 :])
+            model = combo.model()
+            for j in range(combo.count()):
+                item = model.item(j) if hasattr(model, "item") else None
+                if item is not None:
+                    item.setEnabled(combo.itemText(j) not in others)
+            self.answers[i].setPlaceholderText(Q.placeholder(combo.currentText()))
+        self._changed()
+
+    def _changed(self) -> None:
+        problems = Q.questions_problems(self.pairs())
+        typed = any(e.text().strip() for e in self.answers)
+        if not problems:
+            text, color = "✓ 3 个问题都设好了", GREEN
+        elif not typed:
+            text, color = "3 个都要填；忘记密码时答对任意一个即可", MUTED
+        else:
+            # 只提示第一处还没好的，避免一上来满屏红字
+            text, color = "○ " + problems[0], MUTED if "还没填" in problems[0] else RED
+        self.hint.setText(f'<span style="color:{color}">{text}</span>')
+        self.changed.emit()
+
+    def pairs(self) -> list[tuple[str, str]]:
+        return [(c.currentText(), e.text()) for c, e in zip(self.combos, self.answers)]
+
+    def is_ok(self) -> bool:
+        return not Q.questions_problems(self.pairs())
+
+
+class AnswerForm(QWidget):
+    """忘记密码时作答：列出这个保险箱的密保问题，答对任意一个即可。"""
+
+    changed = Signal()
+
+    def __init__(self, questions: list[str], parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        self.edits: list[QLineEdit] = []
+        for i, q in enumerate(questions):
+            lay.addWidget(label(f"{i + 1}. {q}", role="sub"))
+            edit = QLineEdit()
+            edit.setPlaceholderText(Q.placeholder(q))
+            edit.textChanged.connect(lambda _t: self.changed.emit())
+            lay.addWidget(edit)
+            self.edits.append(edit)
+
+    def answers(self) -> list[str]:
+        return [e.text() for e in self.edits]
+
+    def any_filled(self) -> bool:
+        return any(e.text().strip() for e in self.edits)
+
+    def focus_first(self) -> None:
+        if self.edits:
+            self.edits[0].setFocus()
 
 
 class DropZone(QFrame):

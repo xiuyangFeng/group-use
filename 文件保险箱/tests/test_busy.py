@@ -14,7 +14,7 @@ from core import constants as C
 from core import fsutil
 from core.errors import PasswordError, VaultError
 from core.vault import Vault
-from tests.conftest import PASSWORD, make_tree, snapshot, write_file
+from tests.conftest import PASSWORD, QUESTIONS, make_tree, snapshot, write_file
 
 
 def _new_vault(tmp_path, name="保险箱"):
@@ -22,7 +22,7 @@ def _new_vault(tmp_path, name="保险箱"):
     make_tree(root)
     before = snapshot(root)
     v = Vault(root, audit_dir=tmp_path / "audit")
-    v.create(PASSWORD)
+    v.create(PASSWORD, QUESTIONS)
     v.close()
     return root, before
 

@@ -24,10 +24,12 @@ from cryptography.exceptions import InvalidTag
 
 from . import constants as C
 from . import crypto, fsutil, inuse, passwords, protect, transform
+from . import questions as Q
 from .audit import AuditLog
 from .control import OperationControl
 from .errors import (
     AlreadyVaultError,
+    AnswerError,
     DiskSpaceError,
     InUseError,
     IntegrityError,
@@ -45,6 +47,7 @@ from .lockfile import VaultLock
 from .manifest import FileEntry, Manifest
 
 ProgressFn = Callable[[dict], None]
+Answers = "list[str | None] | None"  # 和 header 里的密保问题一一对应；空的跳过
 BATCH = 32
 IN_PROGRESS = (C.LOCKING, C.UNLOCKING, C.INCONSISTENT)
 
@@ -263,11 +266,20 @@ class Vault:
 
     # ---------------------------------------------------------------- 密钥
 
-    def _open_key(self, password: str | None = None, recovery_key: bytes | None = None) -> bytes:
+    def _open_key(
+        self,
+        password: str | None = None,
+        recovery_key: bytes | None = None,
+        answers: "list[str | None] | None" = None,
+    ) -> bytes:
         if self._key is not None:
             return self._key
         h = self.header
-        if recovery_key is not None:
+        if answers is not None:
+            self._key = self._key_from_answers(h, answers)
+        elif recovery_key is not None:
+            if not h.has_recovery_key:
+                raise RecoveryKeyError("这个保险箱没有恢复密钥，请用密保问题找回")
             kek = crypto.recovery_kek(recovery_key, h.vault_id)
             try:
                 self._key = crypto.unwrap_keys(h.wrapped_rec, kek, h.vault_id, "recovery")
@@ -282,6 +294,51 @@ class Vault:
         else:
             raise PasswordError("需要密码")
         return self._key
+
+    # ---------------------------------------------------------------- 密保问题
+
+    @staticmethod
+    def _question_purpose(index: int) -> str:
+        return f"question:{index}"
+
+    def _wrap_questions(self, key: bytes, vault_id: str, pairs: list[tuple[str, str]], kdf_params: dict) -> list[dict]:
+        """每个答案各派生一把钥匙包裹 vault_key：答对任意一个都能解开。"""
+        out = []
+        for i, (q, a) in enumerate(pairs):
+            q = q.strip()
+            kind = Q.kind_of(q)
+            salt = os.urandom(crypto.SALT_LEN)
+            kdf = {k: v for k, v in kdf_params.items() if k != "salt"}
+            kdf["salt"] = crypto.b64e(salt)
+            kek = crypto.derive_kek(Q.normalize_answer(kind, a), salt, kdf)
+            out.append(
+                {
+                    "q": q,
+                    "kind": kind,
+                    "kdf": kdf,
+                    "wrapped": crypto.wrap_keys(key, kek, vault_id, self._question_purpose(i)),
+                }
+            )
+        return out
+
+    def _key_from_answers(self, h: Header, answers: "list[str | None]") -> bytes:
+        if not h.questions:
+            raise AnswerError("这个保险箱还没有设置密保问题")
+        tried = False
+        for i, q in enumerate(h.questions):
+            a = answers[i] if i < len(answers) else None
+            if not a or not a.strip():
+                continue
+            tried = True
+            kdf = q["kdf"]
+            kek = crypto.derive_kek(Q.normalize_answer(q.get("kind", Q.KIND_TEXT), a), crypto.b64d(kdf["salt"]), kdf)
+            try:
+                return crypto.unwrap_keys(q["wrapped"], kek, h.vault_id, self._question_purpose(i))
+            except InvalidTag:
+                continue
+        if not tried:
+            raise AnswerError("请至少回答一个密保问题")
+        raise AnswerError("密保答案不对")
 
     # ---------------------------------------------------------------- 进度
 
@@ -322,6 +379,8 @@ class Vault:
             "file_count": h.file_count,
             "total_bytes": h.total_bytes,
             "recovery_fingerprint": h.recovery_fingerprint,
+            "has_recovery_key": h.has_recovery_key,
+            "questions": h.question_texts,
             "needs_recovery": h.state in (C.LOCKING, C.UNLOCKING, C.INCONSISTENT),
             "protected": protect.is_protected(self.root),
             "in_use_by": inuse.describe(inuse.active_users(self.root)),
@@ -329,18 +388,20 @@ class Vault:
 
     # ================================================================ 创建
 
-    def create(self, password: str, progress: ProgressFn | None = None, control: OperationControl | None = None) -> dict:
-        """一步创建（CLI / 测试用）：生成密钥并首次上锁。"""
-        prepared = self.prepare_new(password)
+    def create(
+        self,
+        password: str,
+        questions: list[tuple[str, str]],
+        progress: ProgressFn | None = None,
+        control: OperationControl | None = None,
+    ) -> dict:
+        """一步创建（CLI / 测试用）：生成密钥、设密保并首次上锁。"""
+        prepared = self.prepare_new(password, questions)
         stats = self.initial_lock(progress=progress, control=control)
-        return {
-            "recovery_key": prepared["recovery_key"],
-            "recovery_fingerprint": prepared["recovery_fingerprint"],
-            "stats": stats,
-        }
+        return {"questions": prepared["questions"], "stats": stats}
 
-    def prepare_new(self, password: str) -> dict:
-        """第一步：校验 + 生成 header / 恢复密钥（很快）。GUI 先展示恢复密钥，再调用 initial_lock。"""
+    def prepare_new(self, password: str, questions: list[tuple[str, str]]) -> dict:
+        """第一步：校验 + 生成 header（含 3 个密保问题，几秒）。之后调用 initial_lock。"""
         self._header = None
         self._require_root()
         if self.is_vault():
@@ -350,6 +411,8 @@ class Vault:
             if leftovers:
                 raise AlreadyVaultError("文件夹里有 .vault 但缺少 header.json，可能上次创建没完成；请先备份整个文件夹再排查")
         passwords.validate_password(password)
+        pairs = [(str(q), str(a)) for q, a in questions]
+        Q.validate_questions(pairs)
 
         scan, total_bytes, skipped = fsutil.scan_tree(self.root, {C.VAULT_DIRNAME, C.MARKER_NAME})
         max_file = max((e.size for e in scan if not e.is_dir), default=0)
@@ -362,9 +425,7 @@ class Vault:
         key = os.urandom(crypto.KEY_LEN)
         vault_id = str(uuid.uuid4())
         wrapped_pw = crypto.wrap_keys(key, kek, vault_id, "password")
-        recovery = crypto.new_recovery_key()
-        wrapped_rec = crypto.wrap_keys(key, crypto.recovery_kek(recovery, vault_id), vault_id, "recovery")
-        fingerprint = crypto.recovery_fingerprint(recovery)
+        wrapped_q = self._wrap_questions(key, vault_id, pairs, kdf)
 
         ts = now_iso()
         h = Header(
@@ -372,11 +433,12 @@ class Vault:
             created_at=ts,
             kdf=kdf,
             wrapped_pw=wrapped_pw,
-            wrapped_rec=wrapped_rec,
-            recovery_fingerprint=fingerprint,
-            recovery_generated_at=ts,
+            wrapped_rec={},
+            recovery_fingerprint="",
+            recovery_generated_at="",
             state=C.LOCKING,
             state_since=ts,
+            questions=wrapped_q,
         )
 
         self._acquire()
@@ -396,8 +458,7 @@ class Vault:
             crash.point("create:after_header")
 
             return {
-                "recovery_key": crypto.recovery_key_str(recovery),
-                "recovery_fingerprint": fingerprint,
+                "questions": h.question_texts,
                 "files": len([e for e in scan if not e.is_dir]),
                 "dirs": len([e for e in scan if e.is_dir]),
                 "bytes": total_bytes,
@@ -423,7 +484,15 @@ class Vault:
     # ================================================================ 上锁
 
     @locked
-    def lock(self, password: str | None = None, progress: ProgressFn | None = None, control: OperationControl | None = None) -> dict:
+    def lock(
+        self,
+        password: str | None = None,
+        progress: ProgressFn | None = None,
+        control: OperationControl | None = None,
+        *,
+        recovery_key: bytes | None = None,
+        answers: "list[str | None] | None" = None,
+    ) -> dict:
         self._require_vault()
         h = self.header
         if h.state == C.LOCKED:
@@ -434,7 +503,7 @@ class Vault:
             raise VaultStateError(f"当前状态不能上锁：{h.state}")
 
         self._precheck_in_use()
-        self._open_key(password=password)
+        self._open_key(password=password, recovery_key=recovery_key, answers=answers)
         self._precheck_busy()
         self._open_session()
         try:
@@ -708,6 +777,8 @@ class Vault:
         progress: ProgressFn | None = None,
         recovery_key: bytes | None = None,
         control: OperationControl | None = None,
+        *,
+        answers: "list[str | None] | None" = None,
     ) -> dict:
         self._require_vault()
         h = self.header
@@ -721,11 +792,12 @@ class Vault:
             raise IntegrityError("manifest.db 丢失：保险箱的元数据不见了，请从备份恢复，不要继续操作")
 
         if recovery_key is None:
+            # 6 位密码和密保答案都容易被猜：连续输错同样要等（恢复密钥是 160 位随机数，不用）
             self._throttle_unlock()
         try:
-            self._open_key(password=password, recovery_key=recovery_key)
-        except (PasswordError, RecoveryKeyError) as exc:
-            if isinstance(exc, PasswordError):
+            self._open_key(password=password, recovery_key=recovery_key, answers=answers)
+        except (PasswordError, RecoveryKeyError, AnswerError) as exc:
+            if isinstance(exc, (PasswordError, AnswerError)):
                 h.failed_attempts = (h.failed_attempts or 0) + 1
                 h.last_failed_at = now_iso()
                 try:
@@ -922,6 +994,8 @@ class Vault:
         rollback: bool = False,
         recovery_key: bytes | None = None,
         control: OperationControl | None = None,
+        *,
+        answers: "list[str | None] | None" = None,
     ) -> dict:
         self._require_vault()
         h = self.header
@@ -932,7 +1006,7 @@ class Vault:
         if h.state == C.UNLOCKING and not self.manifest_path.exists():
             raise IntegrityError("manifest.db 丢失：无法恢复解锁操作，请从备份恢复")
 
-        self._open_key(password=password, recovery_key=recovery_key)
+        self._open_key(password=password, recovery_key=recovery_key, answers=answers)
         self._open_session()
         try:
             manifest = self._open_manifest()
@@ -1014,7 +1088,15 @@ class Vault:
     # ================================================================ 校验
 
     @locked
-    def verify(self, password: str | None = None, progress: ProgressFn | None = None, recovery_key: bytes | None = None, control: OperationControl | None = None) -> dict:
+    def verify(
+        self,
+        password: str | None = None,
+        progress: ProgressFn | None = None,
+        recovery_key: bytes | None = None,
+        control: OperationControl | None = None,
+        *,
+        answers: "list[str | None] | None" = None,
+    ) -> dict:
         self._require_vault()
         h = self.header
         if h.state in IN_PROGRESS:
@@ -1023,7 +1105,7 @@ class Vault:
             raise VaultStateError("只有上锁状态才能做完整性校验（解锁时文件可被正常修改，校验没意义）")
         if not self.manifest_path.exists():
             raise IntegrityError("manifest.db 丢失：保险箱的元数据不见了，请从备份恢复")
-        self._open_key(password=password, recovery_key=recovery_key)
+        self._open_key(password=password, recovery_key=recovery_key, answers=answers)
         self._open_session()
         try:
             manifest = self._open_manifest()
@@ -1061,6 +1143,17 @@ class Vault:
         if self.header.state in IN_PROGRESS:
             raise RecoveryNeededError(self.header.state)
 
+    def _set_new_password(self, key: bytes, new_password: str) -> None:
+        h = self.header
+        salt = os.urandom(crypto.SALT_LEN)
+        kdf = crypto.choose_kdf_params()
+        kdf["salt"] = crypto.b64e(salt)
+        kek_new = crypto.derive_kek(new_password, salt, kdf)
+        h.kdf = kdf
+        h.wrapped_pw = crypto.wrap_keys(key, kek_new, h.vault_id, "password")
+        h.failed_attempts = 0
+        h.last_failed_at = ""
+
     @locked
     def change_password(self, old_password: str, new_password: str) -> None:
         self._require_vault()
@@ -1072,52 +1165,74 @@ class Vault:
             key = crypto.unwrap_keys(h.wrapped_pw, kek, h.vault_id, "password")
         except InvalidTag:
             raise PasswordError("原密码不对")
-        salt = os.urandom(crypto.SALT_LEN)
-        kdf = crypto.choose_kdf_params()
-        kdf["salt"] = crypto.b64e(salt)
-        kek_new = crypto.derive_kek(new_password, salt, kdf)
-        h.kdf = kdf
-        h.wrapped_pw = crypto.wrap_keys(key, kek_new, h.vault_id, "password")
+        self._set_new_password(key, new_password)
         self._save_header()
         self._record("CHANGE_PASSWORD")
 
     @locked
-    def reset_with_recovery_key(self, recovery_key: bytes, new_password: str) -> None:
+    def reset_with_answers(self, answers: "list[str | None]", new_password: str) -> None:
+        """忘记密码：答对任意一个密保问题，设新密码。"""
         self._require_vault()
         self._require_stable_state()
         passwords.validate_password(new_password, field="新密码")
         h = self.header
+        if h.failed_attempts:
+            self._throttle_unlock()
+        try:
+            key = self._key_from_answers(h, answers)
+        except AnswerError as exc:
+            h.failed_attempts = (h.failed_attempts or 0) + 1
+            h.last_failed_at = now_iso()
+            try:
+                self._save_header()
+            except OSError:
+                pass
+            self._record("RESET_FAILED", result="fail", detail=str(exc))
+            raise
+        self._set_new_password(key, new_password)
+        self._save_header()
+        self._record("RESET_BY_QUESTIONS")
+
+    @locked
+    def reset_with_recovery_key(self, recovery_key: bytes, new_password: str) -> None:
+        """旧版本建的保险箱还有恢复密钥：仍然可以用它重置密码。"""
+        self._require_vault()
+        self._require_stable_state()
+        passwords.validate_password(new_password, field="新密码")
+        h = self.header
+        if not h.has_recovery_key:
+            raise RecoveryKeyError("这个保险箱没有恢复密钥，请用密保问题找回")
         kek = crypto.recovery_kek(recovery_key, h.vault_id)
         try:
             key = crypto.unwrap_keys(h.wrapped_rec, kek, h.vault_id, "recovery")
         except InvalidTag:
             raise RecoveryKeyError("恢复密钥不对")
-        salt = os.urandom(crypto.SALT_LEN)
-        kdf = crypto.choose_kdf_params()
-        kdf["salt"] = crypto.b64e(salt)
-        kek_new = crypto.derive_kek(new_password, salt, kdf)
-        h.kdf = kdf
-        h.wrapped_pw = crypto.wrap_keys(key, kek_new, h.vault_id, "password")
+        self._set_new_password(key, new_password)
         self._save_header()
         self._record("RESET_BY_RECOVERY")
 
     @locked
-    def regenerate_recovery_key(self, password: str) -> dict:
+    def set_security_questions(self, password: str, questions: list[tuple[str, str]]) -> dict:
+        """设置 / 更换 3 个密保问题（要验证当前密码）。旧版本留下的恢复密钥随之作废。"""
         self._require_vault()
         self._require_stable_state()
+        pairs = [(str(q), str(a)) for q, a in questions]
+        Q.validate_questions(pairs)
         h = self.header
         kek = crypto.derive_kek(password, h.kdf_salt, h.kdf)
         try:
             key = crypto.unwrap_keys(h.wrapped_pw, kek, h.vault_id, "password")
         except InvalidTag:
             raise PasswordError("密码不对")
-        rec = crypto.new_recovery_key()
-        h.wrapped_rec = crypto.wrap_keys(key, crypto.recovery_kek(rec, h.vault_id), h.vault_id, "recovery")
-        h.recovery_fingerprint = crypto.recovery_fingerprint(rec)
-        h.recovery_generated_at = now_iso()
+        params = {k: v for k, v in h.kdf.items() if k != "salt"}
+        h.questions = self._wrap_questions(key, h.vault_id, pairs, params)
+        dropped = h.has_recovery_key
+        h.wrapped_rec = {}
+        h.recovery_fingerprint = ""
+        h.recovery_generated_at = ""
         self._save_header()
-        self._record("REGENERATE_RECOVERY")
-        return {"recovery_key": crypto.recovery_key_str(rec), "recovery_fingerprint": h.recovery_fingerprint}
+        self._record("SET_QUESTIONS", detail="旧的恢复密钥已作废" if dropped else "")
+        return {"questions": h.question_texts, "dropped_recovery_key": dropped}
 
     # ================================================================ 维护
 

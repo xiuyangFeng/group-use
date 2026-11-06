@@ -16,7 +16,8 @@ from pathlib import Path
 
 from core.console import hard_exit
 
-PASSWORD = "Selfcheck-Password-1234"
+PASSWORD = "246810"
+QUESTIONS = [("我的生日", "1998-03-12"), ("我出生的城市", "北京"), ("母亲的生日", "1970-01-02")]
 _ok = 0
 _failed: list[str] = []
 _lines: list[str] = []
@@ -114,7 +115,7 @@ def run(report_path: str | None = None) -> int:
 
     def _roundtrip():
         v = Vault(root, audit_dir=cfg)
-        v.create(PASSWORD)
+        v.create(PASSWORD, QUESTIONS)
         assert Vault(root).status()["state"] == "LOCKED"
         v.close()
         v = Vault(root, audit_dir=cfg)

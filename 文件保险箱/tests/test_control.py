@@ -11,28 +11,28 @@ from core import constants as C
 from core.control import OperationControl
 from core.errors import Cancelled
 from core.vault import Vault
-from tests.conftest import PASSWORD, make_tree, snapshot
+from tests.conftest import PASSWORD, QUESTIONS, make_tree, snapshot
 
 
 def _make_vault(root, audit_dir):
     v = Vault(root, audit_dir=audit_dir)
-    v.create(PASSWORD)
+    v.create(PASSWORD, QUESTIONS)
     v.close()
 
 
 def test_two_phase_create(tmp_path, audit_dir):
-    """GUI 创建向导：先拿恢复密钥给用户抄，再执行首次上锁。"""
+    """GUI 创建向导：先设好密码和密保（生成 header），再执行首次上锁。"""
     root = tmp_path / "data"
     make_tree(root)
     before = snapshot(root)
 
     v = Vault(root, audit_dir=audit_dir)
-    prepared = v.prepare_new(PASSWORD)
+    prepared = v.prepare_new(PASSWORD, QUESTIONS)
     assert v.status()["state"] == C.LOCKING
     assert prepared["files"] == 6 and prepared["dirs"] == 4
-    assert len(prepared["recovery_key"].replace("-", "")) == 32
-    # 恢复密钥对应的指纹与 header 一致
-    assert prepared["recovery_fingerprint"] == v.header.recovery_fingerprint
+    assert prepared["questions"] == [q for q, _a in QUESTIONS]
+    # 新保险箱没有恢复密钥，只有密保问题
+    assert not v.header.has_recovery_key and v.header.recovery_fingerprint == ""
 
     stats = v.initial_lock()
     assert stats["files"] == 6
@@ -148,7 +148,7 @@ def test_abort_create_before_initial_lock(tmp_path, audit_dir):
     before = snapshot(root)
 
     v = Vault(root, audit_dir=audit_dir)
-    v.prepare_new(PASSWORD)
+    v.prepare_new(PASSWORD, QUESTIONS)
     assert v.abort_create() is True
     v.close()
 

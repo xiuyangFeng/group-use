@@ -3,7 +3,7 @@
 和 `--selftest` 的区别：
 - selftest 为了快，用测试 KDF（FDVAULT_KDF_FAST）和小分块，检查组件能不能用；
 - acceptance 用**默认参数**（Argon2id 64 MiB、4 MiB 分块），检查真实使用路径：
-  创建 → 解锁 → 字节比对 → 上锁 → 恢复密钥解锁 → 审计链 → 权限位 → 明文残留扫描。
+  创建 → 解锁 → 字节比对 → 上锁 → 密保答案解锁 → 审计链 → 权限位 → 明文残留扫描。
 
 用法：
     文件保险箱 --acceptance
@@ -18,7 +18,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-PASSWORD = "Acceptance-Password-1234"
+PASSWORD = "246810"
+QUESTIONS = [("我的生日", "1998-03-12"), ("我出生的城市", "北京"), ("母亲的生日", "1970-01-02")]
 MARKER = "ACCEPTANCE-PLAINTEXT-MARKER-7f3a9c"
 _ok = 0
 _failed: list[str] = []
@@ -111,7 +112,6 @@ def run(report_path: str | None = None) -> int:
     _report_path = report_path
     from core.audit import AuditLog
     from core import constants as C
-    from core.crypto import recovery_fingerprint, recovery_key_parse
     from core.vault import Vault
 
     tmp = Path(tempfile.mkdtemp(prefix="fdvault-acceptance-"))
@@ -119,14 +119,13 @@ def run(report_path: str | None = None) -> int:
     root.mkdir()
     before = _make_tree(root)
     audit_dir = tmp / "audit"
-    recovery_key_str: list[str] = []
 
     _say("== 真实参数端到端 ==")
 
     def _create():
         v = Vault(root, audit_dir=audit_dir)
-        info = v.create(PASSWORD)
-        recovery_key_str.append(info["recovery_key"])
+        info = v.create(PASSWORD, QUESTIONS)
+        assert info["questions"] == [q for q, _a in QUESTIONS]
         assert Vault(root).status()["state"] == C.LOCKED
         assert info["stats"]["files"] >= 5
         v.close()
@@ -166,18 +165,16 @@ def run(report_path: str | None = None) -> int:
 
     _check("上锁后不能移动 / 改名 / 删除", _protected)
 
-    def _recovery_key_unlock():
-        key = recovery_key_parse(recovery_key_str[0])
-        assert recovery_fingerprint(key) == Vault(root).header.recovery_fingerprint
+    def _answer_unlock():
         v = Vault(root, audit_dir=audit_dir)
-        v.unlock(recovery_key=key)
+        v.unlock(answers=[None, "北京市", None])  # 只答对第 2 个问题
         try:
             assert _digest(root) == before
         finally:
             v.lock()
             v.close()
 
-    _check("恢复密钥解锁（默认参数）", _recovery_key_unlock)
+    _check("答对一个密保问题即可解锁（默认参数）", _answer_unlock)
 
     def _audit_chain():
         log = AuditLog(audit_dir / "audit.jsonl")
