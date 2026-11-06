@@ -219,7 +219,7 @@ def test_legacy_vault_still_works_with_recovery_key(tmp_path, audit_dir):
     root, _ = setup(tmp_path, audit_dir)
     rec = make_legacy(root)
     # 旧版本的 header 仍按版本 1 写，旧版软件也能打开
-    assert json.loads((root / ".vault" / "header.json").read_text())["version"] == C.FORMAT_VERSION_LEGACY
+    assert json.loads((root / ".vault" / "header.json").read_text(encoding="utf-8"))["version"] == C.FORMAT_VERSION_LEGACY
     st = Vault(root).status()
     assert st["has_recovery_key"] and st["questions"] == []
 
@@ -230,7 +230,7 @@ def test_legacy_vault_still_works_with_recovery_key(tmp_path, audit_dir):
     v.close()
     Vault(root, audit_dir=audit_dir).reset_with_recovery_key(key, NEW_PW)
     Vault(root, audit_dir=audit_dir).unlock(password=NEW_PW)
-    assert json.loads((root / ".vault" / "header.json").read_text())["version"] == C.FORMAT_VERSION_LEGACY
+    assert json.loads((root / ".vault" / "header.json").read_text(encoding="utf-8"))["version"] == C.FORMAT_VERSION_LEGACY
 
 
 def test_legacy_vault_wrong_recovery_key(tmp_path, audit_dir):
@@ -248,7 +248,7 @@ def test_legacy_vault_upgrade_to_questions_drops_recovery_key(tmp_path, audit_di
     rec = crypto.recovery_key_parse(make_legacy(root))
     res = Vault(root, audit_dir=audit_dir).set_security_questions(PASSWORD, QUESTIONS)
     assert res["dropped_recovery_key"] is True
-    data = json.loads((root / ".vault" / "header.json").read_text())
+    data = json.loads((root / ".vault" / "header.json").read_text(encoding="utf-8"))
     assert data["version"] == C.FORMAT_VERSION
     assert data["wrapped_vault_key_recovery"] == {} and data["recovery_fingerprint"] == ""
     with pytest.raises(RecoveryKeyError):
