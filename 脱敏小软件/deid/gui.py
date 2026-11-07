@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import theme, vault_link
 from .history import last_deid_run, load_runs, open_path
-from .pipeline import MAX_WORKERS, Control, Job, is_disk_full
+from .pipeline import EMPTY, MAX_WORKERS, SINGLE, Control, Job, detect_input_mode, is_disk_full
 
 
 def _explain(e):
@@ -36,12 +36,29 @@ def _inside(a, b):
         return False
 
 
-def check_paths(inp, out, mp):
-    """三个路径各自的检查结果 [(kind, 文字)]，kind: ok / info / warn / error / idle。只读，不创建任何东西。"""
+def check_paths(inp, out, mp, single_override=None):
+    """三个路径各自的检查结果，加上判断出的输入文件夹结构。
+
+    返回 (res, layout, single)：
+      res    [(kind, 文字)]，kind: ok / info / warn / error / idle
+      layout pipeline.InputLayout（路径不可用时为 None）
+      single 最终采用的模式：single_override 为 None 时按 layout 自动判断
+    只读，不创建任何东西。
+    """
     pi = Path(inp).expanduser() if inp else None
     po = Path(out).expanduser() if out else None
     pm = Path(mp).expanduser() if mp else None
-    res = _check_plain(pi, po, pm)
+    layout = None
+    if pi is not None and pi.is_dir():
+        try:
+            layout = detect_input_mode(pi)
+        except OSError:
+            layout = None
+    if single_override is not None:
+        single = bool(single_override)
+    else:
+        single = bool(layout is not None and layout.mode == SINGLE)
+    res = _check_plain(pi, po, pm, single, layout, auto=single_override is None)
     # 「文件保险箱」：锁着的保险箱里的东西看起来“不存在”，要先解锁；输出放在保险箱里会跟着被加密
     for i, (path, what) in enumerate(((pi, "原始数据"), (po, "输出文件夹"), (pm, "映射表"))):
         if not path or res[i][0] == "idle":
@@ -54,24 +71,47 @@ def check_paths(inp, out, mp):
             res[i] = ("warn", f"在保险箱「{root.name}」里：锁回时脱敏结果也会被加密。要发出去的数据建议放在保险箱外面")
         elif root is not None and res[i][0] in ("ok", "info"):
             res[i] = (res[i][0], f"{res[i][1]}（在已解锁的保险箱「{root.name}」里，处理期间不会自动上锁）")
-    return res
+    return res, layout, single
 
 
-def _check_plain(pi, po, pm):
+def _check_plain(pi, po, pm, single=False, layout=None, auto=True):
     res = []
 
     if not pi:
         res.append(("idle", "还没有选择"))
     elif not pi.is_dir():
         res.append(("error", "找不到这个文件夹（移动硬盘没插？）"))
-    else:
-        try:
-            n = sum(1 for e in os.scandir(pi) if e.is_dir() and not e.name.startswith("."))
-        except OSError as e:
-            res.append(("error", f"打不开：{e.strerror or e}"))
+    elif single:
+        if layout is not None and layout.reason == "mixed_root":
+            res.append(("error", "根目录里的 DICOM 文件属于多个患者 ID，不能按单个患者处理；"
+                                 "请把每个患者的文件分别放进各自的文件夹"))
+        elif auto:
+            why = {"root_dicoms": "自动判断：文件夹里直接有 DICOM 文件",
+                   "same_patient": "自动判断：各子文件夹里的 DICOM 属于同一个患者"}.get(
+                       layout.reason if layout is not None else "", "自动判断")
+            res.append(("ok", f"单个患者模式：把选中的文件夹当作一个患者（{why}）"))
         else:
-            res.append(("ok", f"找到 {n} 个子文件夹（每个是一个患者）") if n
-                       else ("warn", "里面没有子文件夹。应选“装着各个患者文件夹”的那一层"))
+            res.append(("ok", "单个患者模式：把选中的文件夹当作一个患者（手动指定；"
+                              "如果里面有多个患者，开始时会拒绝，不会混在一起）"))
+    elif layout is None or layout.mode == EMPTY:
+        res.append(("warn", "里面没有找到 DICOM 文件：请选“装着各个患者文件夹”的那一层；"
+                            "只处理一个患者时，勾选下面“只处理一个患者”"))
+    elif layout.reason == "mixed_root" and not layout.children:
+        res.append(("error", "根目录里的 DICOM 文件属于多个患者 ID，不能按单个患者处理；"
+                             "也没有子文件夹可按批量处理。请把每个患者的文件分别放进各自的文件夹"))
+    elif not layout.children:
+        res.append(("warn", "里面没有子文件夹：只处理一个患者时，请勾选下面“只处理一个患者”"))
+    else:
+        note = ""
+        if layout.mode == SINGLE:
+            note = "（当前按批量处理；这个文件夹看着像单个患者，取消勾选下面“只处理一个患者”就按单个患者处理）"
+        elif layout.reason == "mixed_root":
+            note = "（根目录下还有 DICOM 文件，批量模式下会被忽略；如果它们也是患者数据，请勾选下面“只处理一个患者”）"
+        elif layout.reason == "same_patient":
+            note = "（子文件夹里的 DICOM 都属于同一个患者：如果选中的文件夹本身就是一个患者，勾选下面“只处理一个患者”更合适）"
+        elif layout.reason == "no_pid":
+            note = "（子文件夹里没读到患者 ID，先按批量处理；如果这其实是同一个患者的多次检查，请勾选下面“只处理一个患者”）"
+        res.append(("warn" if note else "ok", f"找到 {layout.children} 个子文件夹（每个是一个患者）{note}"))
 
     if not po:
         res.append(("idle", "还没有选择"))
@@ -251,6 +291,7 @@ class StatusPanel:
         self._set_progress(False)
         self._set_stats([])
         self._set_notes([("ok", "原始数据只读：不修改、不移动、不删除任何文件"),
+                         ("ok", "只处理一个患者：直接把那个患者的文件夹选上，软件会自动识别，不用选上一层"),
                          ("ok", "每个文件写出前都会再校验一遍，校验不通过的不写出"),
                          ("ok", "可以随时暂停或停止；下次用同样的路径再点开始，会从停下的地方接着做"),
                          ("warn", "映射表和日志里有患者信息，只保存在本机，不要随数据发出去")])
@@ -402,6 +443,9 @@ class App:
         self.run_title = ""
         self._log_path = None
         self._check_seq = 0
+        # “只处理一个患者”模式：None = 按文件夹结构自动判断；True/False = 用户手动指定
+        self._single_override = None
+        self._setting_mode = False
 
         theme.apply(root)
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
@@ -435,7 +479,7 @@ class App:
         titles = ttk.Frame(header, style="Header.TFrame")
         titles.pack(side="left", padx=(12, 0))
         ttk.Label(titles, text="CT 数据脱敏工具", style="AppTitle.TLabel").pack(anchor="w")
-        ttk.Label(titles, text="批量去除 DICOM 里的患者身份信息，输出可以发给外部做分割 / 标注",
+        ttk.Label(titles, text="去除 DICOM 里的患者身份信息，输出可以发给外部做分割 / 标注",
                   style="AppSub.TLabel").pack(anchor="w")
         self.hist_btn = ttk.Button(header, text="处理记录", style="Header.TButton", command=self.open_history)
         self.hist_btn.pack(side="right")
@@ -462,7 +506,8 @@ class App:
         outer.grid(row=0, column=0, sticky="ew")
         c.columnconfigure(0, weight=1)
         rows = [
-            ("folder", "原始数据文件夹", "每个子文件夹是一个患者", None, self.in_var, self.pick_input),
+            ("folder", "原始数据文件夹", "每个子文件夹一个患者；只处理一个患者时，直接选那个患者文件夹", None,
+             self.in_var, self.pick_input),
             ("output", "输出文件夹", "脱敏后的数据，发出去的就是它", None, self.out_var, self.pick_output),
             ("table", "映射表", "编号 ↔ 患者的对照表", "仅本机 · 勿外发", self.map_var, self.pick_mapping),
         ]
@@ -490,7 +535,17 @@ class App:
             theme.autowrap(chk, row, theme.scaled(self.root, 50))
             self.checks.append(chk)
             self.path_widgets += [e, b]
-            var.trace_add("write", lambda *a: self._schedule_check())
+            if i == 0:
+                # 自动判断是批量还是单个患者；判断不对可以在这里手动改
+                self.single_var = tk.BooleanVar(value=False)
+                self.single_cb = theme.CheckBox(
+                    row, "只处理一个患者（选中的文件夹本身就是一个患者）", self.single_var,
+                    hint="自动判断，一般不用改：把那个患者的文件夹直接选上就行")
+                self.single_cb.grid(row=3, column=1, columnspan=2, sticky="w", pady=(6, 0))
+                self.single_var.trace_add("write", self._on_mode_change)
+                var.trace_add("write", self._on_input_change)
+            else:
+                var.trace_add("write", lambda *a: self._schedule_check())
 
         # 第 2 步：选项（默认收起，只显示一行摘要）
         outer, c = self._step_card(left, 2, "选项")
@@ -583,25 +638,45 @@ class App:
         seq = self._check_seq
         self.root.after(250, lambda: self._run_check(seq))
 
+    def _on_input_change(self, *_):
+        """换了原始数据文件夹：清掉手动指定，重新自动判断批量 / 单个患者。"""
+        self._single_override = None
+        self._schedule_check()
+
+    def _on_mode_change(self, *_):
+        """用户勾选/取消“只处理一个患者”：记录下来，重新检查。"""
+        if self._setting_mode:
+            return
+        self._single_override = bool(self.single_var.get())
+        self._schedule_check()
+
     def _run_check(self, seq):
         if seq != self._check_seq:
             return
         args = (self.in_var.get().strip(), self.out_var.get().strip(), self.map_var.get().strip())
+        override = self._single_override
 
         def work():
             try:
-                res = check_paths(*args)
+                res, layout, single = check_paths(*args, single_override=override)
             except Exception as e:  # 检查只是提示，出错不影响使用
-                res = [("idle", f"无法检查：{e}")] * 3
-            self.q.put(("checks", (seq, res)))
+                res, single = [("idle", f"无法检查：{e}")] * 3, bool(override)
+            self.q.put(("checks", (seq, res, single)))
         threading.Thread(target=work, daemon=True).start()
 
-    def _show_checks(self, seq, res):
+    def _show_checks(self, seq, res, single):
         if seq != self._check_seq:
             return
         icons = {"ok": "✓ ", "info": "• ", "warn": "! ", "error": "✕ ", "idle": ""}
         for lab, (kind, text) in zip(self.checks, res):
             lab.configure(text=icons.get(kind, "") + text, style=f"Check{kind}.TLabel")
+        # 没有手动指定时，勾选框跟着自动判断的结果走
+        if self._single_override is None and bool(self.single_var.get()) != bool(single):
+            self._setting_mode = True
+            try:
+                self.single_var.set(bool(single))
+            finally:
+                self._setting_mode = False
 
     # ---------- 日志与处理记录
     def _append_log(self, text):
@@ -630,10 +705,22 @@ class App:
         self.out_var.set(r.get("output", ""))
         self.map_var.set(r.get("mapping", ""))
         self._auto_out = r.get("output", "")
+        if "single_patient" in r:  # 上次是批量还是单个患者，接着用同一种模式
+            self.restore_mode(bool(r.get("single_patient")))
         self.panel.show_record(r)
         self._set_log_path(r.get("log"))
         self._append_log("已自动填好上次的三个路径，上次的结果见上方。\n"
                          "点右上角“处理记录”可以查看所有历史，以及原始数据文件夹里哪些子文件夹还没处理。")
+
+    def restore_mode(self, single):
+        """把“只处理一个患者”设成指定值（从处理记录恢复），之后不自动改，换文件夹才重新判断。"""
+        self._single_override = bool(single)
+        self._setting_mode = True
+        try:
+            self.single_var.set(bool(single))
+        finally:
+            self._setting_mode = False
+        self._schedule_check()
 
     def open_history(self):
         from .history_gui import HistoryWindow
@@ -686,12 +773,14 @@ class App:
         for w in self.path_widgets + [self.workers_sb]:
             w.state(["disabled"] if locked else ["!disabled"])
         self.exclude_cb.configure_state(not locked)
+        self.single_cb.configure_state(not locked)
         for b in (self.start_btn, self.probe_btn, self.hist_btn, self.opt_toggle):
             b.state(["disabled"] if locked else ["!disabled"])
 
     def _begin(self, title):
         self._w = self._workers()  # 在主线程读取界面值，后台线程不碰 tkinter
         self._exclude = bool(self.exclude_var.get())
+        self._mode = self._single_override  # None = 让 Job 自动判断选中的文件夹是批量还是单个患者
         self.control = Control()
         self.running = True
         self.run_title = title
@@ -733,7 +822,7 @@ class App:
             messagebox.showwarning("提示", "请先选择三个路径")
             return
         self._begin("正在脱敏")
-        threading.Thread(target=self._worker, args=(inp, out, mp), daemon=True).start()
+        threading.Thread(target=self._worker, args=(inp, out, mp, self._mode), daemon=True).start()
 
     def start_probe(self):
         if self.running:
@@ -751,12 +840,13 @@ class App:
             messagebox.showwarning("提示", "该文件已存在。为避免覆盖，请换一个文件名。")
             return
         self._begin("正在结构探查")
-        threading.Thread(target=self._probe_worker, args=(inp, report), daemon=True).start()
+        threading.Thread(target=self._probe_worker, args=(inp, report, self._mode), daemon=True).start()
 
-    def _probe_worker(self, inp, report):
+    def _probe_worker(self, inp, report, single_patient):
         from .probe import ReportSaveError, probe_to_file
         try:
             text = probe_to_file(inp, report, workers=self._w, control=self.control,  # 报告已存在则报错，不覆盖
+                                 single_patient=single_patient,
                                  log=lambda m: self.q.put(("status", m)),
                                  progress=lambda stage, done, total: self.q.put(("progress", (stage, done, total))))
             if text is None:
@@ -806,7 +896,7 @@ class App:
         else:
             self.panel.show_simple("探查出错", "error", "详情见下方日志。")
 
-    def _worker(self, inp, out, mp):
+    def _worker(self, inp, out, mp, single_patient):
         cancelled = {}
 
         def confirm(text):
@@ -820,6 +910,7 @@ class App:
         record, log_path = None, None
         try:
             job = Job(inp, out, mp, workers=self._w, control=self.control, exclude_burned_in=self._exclude,
+                      single_patient=single_patient,
                       log=lambda m: self.q.put(("log", m)),
                       progress=lambda stage, done, total: self.q.put(("progress", (stage, done, total))),
                       confirm=confirm)

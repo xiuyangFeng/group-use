@@ -20,8 +20,8 @@ from datetime import datetime
 from pathlib import Path
 
 from .anonymizer import UidMapper, anonymize, collect_needles
-from .pipeline import (IGNORED_NAMES, MAX_WORKERS, Control, _init_worker, burned_in_reason, checkpoint,
-                       is_disk_full, read_dicom, read_header_fast)
+from .pipeline import (IGNORED_NAMES, MAX_WORKERS, SINGLE, Control, _init_worker, burned_in_reason, checkpoint,
+                       detect_input_mode, is_disk_full, read_dicom, read_header_fast)
 
 SAFE_VALUE_TAGS = ("Modality", "Manufacturer", "ManufacturerModelName", "SpecificCharacterSet",
                    "BurnedInAnnotation", "ImageType", "PhotometricInterpretation", "BitsAllocated")
@@ -109,13 +109,22 @@ def deep_series(paths):
 
 # ---------------------------------------------------------------- 主进程
 
-def probe(input_dir, log=print, progress=None, workers=None, control=None):
-    """返回报告文本；用户点了“停止”则返回 None。"""
+def probe(input_dir, log=print, progress=None, workers=None, control=None, single_patient=None):
+    """返回报告文本；用户点了“停止”则返回 None。
+
+    single_patient: None 自动判断选中的文件夹是“批量”还是“单个患者”；True/False 强制指定。
+    """
     progress = progress or (lambda stage, done, total: None)
     ctl = control or Control()
     workers = max(1, int(workers or MAX_WORKERS))
     input_dir = Path(input_dir)
-    folders = sorted(p for p in input_dir.iterdir() if p.is_dir() and not p.name.startswith("."))
+    if single_patient is None:
+        single_patient = detect_input_mode(input_dir).mode == SINGLE
+    if single_patient:
+        folders = [input_dir]
+        log(f"单个患者模式：把选中的文件夹「{input_dir.name}」当作一个患者")
+    else:
+        folders = sorted(p for p in input_dir.iterdir() if p.is_dir() and not p.name.startswith("."))
 
     # 1. 列出所有文件（只读目录，不打开文件）
     entries = []  # (文件夹序号, 路径, 层级, 文件名)
@@ -215,8 +224,11 @@ def probe(input_dir, log=print, progress=None, workers=None, control=None):
            f"耗时：{_fmt_secs(time.monotonic() - start)}，并行进程数：{workers}", ""]
     if errors:
         out += [f"[注意] 有 {errors} 批文件读取出错", ""]
-    out += [f"子文件夹数：{len(folders)}",
-            f"根目录散落文件数：{sum(1 for p in input_dir.iterdir() if p.is_file())}", ""]
+    if single_patient:
+        out += ["模式：单个患者（选中的文件夹本身就是一个患者，所有文件都属于这一个人）", ""]
+    else:
+        out += [f"子文件夹数：{len(folders)}",
+                f"根目录散落文件数：{sum(1 for p in input_dir.iterdir() if p.is_file())}", ""]
     out += ["== 各文件夹概况 =="] + lines + [""]
 
     def section(title, counter, limit=None):
@@ -266,20 +278,24 @@ def save_report(text, report):
         f.write(text)
 
 
-def probe_to_file(input_dir, report, **kwargs):
+def probe_to_file(input_dir, report, single_patient=None, **kwargs):
     """探查并保存报告（已存在则报错，不覆盖），同时写一条处理记录。用户停止时返回 None。
 
+    single_patient: None 自动判断是“批量”还是“单个患者”；True/False 强制指定。
     报告保存失败时抛出 ReportSaveError，里面带着完整报告，不会白跑一趟。
     """
     from .history import new_run_id, record
     if Path(report).exists():
         raise FileExistsError(f"报告文件已存在，为避免覆盖请换一个文件名：{report}")
     check_report_place(report)
+    if single_patient is None:
+        single_patient = detect_input_mode(input_dir).mode == SINGLE
     rid = new_run_id()
-    record(rid, "start", kind="结构探查", input=str(Path(input_dir).resolve()), report=str(Path(report).resolve()))
+    record(rid, "start", kind="结构探查", input=str(Path(input_dir).resolve()),
+           report=str(Path(report).resolve()), single_patient=single_patient)
     result = "出错"
     try:
-        text = probe(input_dir, **kwargs)
+        text = probe(input_dir, single_patient=single_patient, **kwargs)
         if text is None:
             result = "已停止（未生成报告）"
             return None

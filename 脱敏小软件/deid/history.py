@@ -1,7 +1,9 @@
 """处理记录：每次脱敏 / 结构探查的概况，存在本机固定位置，下次打开软件可以查看。
 
 - 只记录时间、路径（原始数据 / 输出 / 映射表 / 日志 / 报告）、数量和结果，
-  不记录患者姓名、ID、患者文件夹名。每个患者文件夹的明细在映射表里（映射表只留在本地）。
+  不记录患者姓名、ID。批量模式下原始数据路径是“装着患者文件夹的那一层”，不含患者文件夹名；
+  只处理一个患者时，记录的原始数据路径就是所选的患者文件夹本身（用于续跑、核对和恢复模式，
+  只保存在本机）。每个患者文件夹的明细在映射表里（映射表只留在本地）。
 - 文件只追加，从不修改、不删除。写记录失败不影响脱敏本身。
 - 位置：Windows %APPDATA%\\CT_Deid\\处理记录.jsonl；Mac ~/Library/Application Support/CT_Deid/
 """
@@ -101,7 +103,8 @@ def summarize(r):
                   f"输出：{r.get('output', '')}",
                   f"映射表：{r.get('mapping', '')}"]
         if "folders" in r:
-            lines.append(f"{r['folders']} 个文件夹 → {r.get('patients', 0)} 个患者编号"
+            mode = "（单患者模式）" if r.get("single_patient") else ""
+            lines.append(f"{r['folders']} 个文件夹 → {r.get('patients', 0)} 个患者编号{mode}"
                          + (f"，{r['skipped']} 个文件夹跳过（没有 DICOM）" if r.get("skipped") else ""))
         if "written" in r:
             lines.append(f"共 {r.get('files_total', 0)} 个文件：本次写出 {r['written']}，"
@@ -122,9 +125,10 @@ def _norm(p):
     return os.path.normcase(os.path.normpath(str(p)))
 
 
-def folder_status(input_dir, mapping_path):
+def folder_status(input_dir, mapping_path, single_patient=False):
     """原始数据文件夹里每个子文件夹最近一次的处理情况（从映射表读取）。
 
+    single_patient=True：选中的文件夹本身就是一个患者，返回这一行（映射表里的“原文件夹”就是它）。
     返回 [(文件夹名, 映射表行 或 None)]；None 表示映射表里没有这个文件夹的记录。
     """
     from .mapping import read_rows
@@ -136,8 +140,11 @@ def folder_status(input_dir, mapping_path):
         if src and _norm(src) != key:
             continue  # 别的原始数据文件夹里的同名文件夹
         latest[str(r.get("原文件夹") or "")] = r
-    folders = sorted(p.name for p in Path(input_dir).iterdir() if p.is_dir() and not p.name.startswith("."))
-    return [(name, latest.get(name)) for name in folders]
+    if single_patient:
+        names = [Path(input_dir).name]
+    else:
+        names = sorted(p.name for p in Path(input_dir).iterdir() if p.is_dir() and not p.name.startswith("."))
+    return [(name, latest.get(name)) for name in names]
 
 
 def open_path(path):

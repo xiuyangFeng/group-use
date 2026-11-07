@@ -262,6 +262,136 @@ def scan_patient(folder):
     return merge_scan(folder, [scan_files(folder, items)])
 
 
+# ---------------------------------------------------------------- 批量 / 单个患者（选中的文件夹是什么结构）
+
+SINGLE = "single"    # 选中的文件夹本身就是一个患者
+BATCH = "batch"      # 每个子文件夹是一个患者
+EMPTY = "empty"      # 没找到 DICOM 文件
+
+MAX_DETECT_CHILDREN = 40        # 子文件夹超过这个数就直接按批量处理，不逐个读文件（肯定是批量）
+DETECT_FILES_PER_FOLDER = 200   # 每个子文件夹最多看多少个文件来认患者 ID，避免网络盘上卡太久
+
+
+@dataclass(frozen=True)
+class InputLayout:
+    """选中的原始数据文件夹的结构（只用于判断和提示，不影响处理结果）。
+
+    mode: SINGLE 单个患者 / BATCH 批量 / EMPTY 没找到 DICOM
+    children: 一级子文件夹数
+    root_dicoms: 根目录下直接放着的 DICOM 文件数（文件很多时是均匀抽样后的个数，上限 60）
+    reason: root_dicoms / mixed_root / same_patient / no_pid / many_children / no_dicom
+    """
+    mode: str
+    children: int = 0
+    root_dicoms: int = 0
+    reason: str = ""
+
+
+def _is_dicomdir(ds, path):
+    return (os.path.basename(str(path)).upper() == "DICOMDIR"
+            or str(getattr(ds, "file_meta", {}).get("MediaStorageSOPClassUID", "")) == DICOMDIR_CLASS
+            or "DirectoryRecordSequence" in ds)
+
+
+def _sample_entries(items, limit):
+    """从列表里均匀抽取最多 limit 项（包含首尾），避免只抽查开头而漏掉排在后面的文件。"""
+    if len(items) <= limit:
+        return items
+    if limit <= 1:
+        return items[:1]
+    step = (len(items) - 1) / (limit - 1)
+    return [items[round(i * step)] for i in range(limit)]
+
+
+def _count_root_dicoms(files, limit=60):
+    """抽查根目录下直接放着的 DICOM 文件，返回 (DICOM 个数, 患者ID集合)。
+
+    文件很多时均匀抽取 limit 个来认患者，防止漏掉混在后面的另一个患者。
+    DICOMDIR 不算患者数据。
+    """
+    n, pids = 0, set()
+    for path in _sample_entries(files, limit):
+        ds = read_header_fast(path)
+        if ds is None or _is_dicomdir(ds, path):
+            continue
+        n += 1
+        pid = str(ds.get("PatientID", "") or "").strip()
+        if pid:
+            pids.add(pid)
+    return n, pids
+
+
+def _first_patient_id(folder):
+    """在文件夹里（递归）找第一个能读出患者 ID 的 DICOM，返回患者 ID；找不到返回 None。
+
+    只读文件头最前面一段，每个文件夹最多看 DETECT_FILES_PER_FOLDER 个文件。
+    """
+    seen = 0
+    for root, dirs, files in os.walk(folder):
+        dirs.sort()
+        for fn in sorted(files):
+            if fn in IGNORED_NAMES or fn.startswith("._"):
+                continue
+            seen += 1
+            if seen > DETECT_FILES_PER_FOLDER:
+                return None
+            path = os.path.join(root, fn)
+            ds = read_header_fast(path)
+            if ds is None or _is_dicomdir(ds, path):
+                continue
+            pid = str(ds.get("PatientID", "") or "").strip()
+            if pid:
+                return pid
+    return None
+
+
+def detect_input_mode(input_dir):
+    """判断选中的原始数据文件夹是不是“本身就是一个患者”，返回 InputLayout。
+
+    只读，不修改任何文件。自动判断偏保守，只在比较确定时才选“单个患者”：
+    1. 根目录下直接放着 DICOM 文件（批量模式会把这些文件当散落文件忽略掉，等于丢数据），
+       而且这些文件和子文件夹里的 DICOM 都属于同一个患者（或没有子文件夹）→ 单个患者
+    2. 根目录 DICOM 属于多个患者（批量文件夹里混了散落文件）→ 批量，散落文件照旧忽略
+    3. 其他 → 批量（每个子文件夹一个患者）
+
+    文件夹里的 DICOM 都带同一个患者 ID、只是结构比较深的情况（比如“患者/检查/序列/文件”），
+    按批量处理也能得到正确的输出（同一患者 ID 的文件夹会合并成一个编号），所以默认仍按批量，
+    界面上会提示可以勾选“只处理一个患者”。命令行可以用 --single-patient / --batch 指定。
+    """
+    root = Path(input_dir)
+    try:
+        entries = sorted(root.iterdir(), key=lambda p: p.name)
+    except OSError:
+        return InputLayout(EMPTY, reason="no_dicom")
+    children = [p for p in entries if p.is_dir() and not p.name.startswith(".")]
+    root_files = [p for p in entries
+                  if p.is_file() and p.name not in IGNORED_NAMES and not p.name.startswith("._")]
+    root_dicoms, root_pids = _count_root_dicoms(root_files)
+    child_pids = []
+    if len(children) <= MAX_DETECT_CHILDREN:
+        for child in children:
+            pid = _first_patient_id(child)
+            if pid:
+                child_pids.append(pid)
+    all_pids = set(root_pids) | set(child_pids)
+    if root_dicoms:
+        if len(all_pids) <= 1 and (not children or all_pids):
+            # 根目录直接有 DICOM：选中文件夹本身就是一个患者（批量模式会把这些文件丢掉）
+            return InputLayout(SINGLE, len(children), root_dicoms, "root_dicoms")
+        # 根目录的 DICOM 和子文件夹不是同一个患者：是批量文件夹里混了散落文件，按批量，散落文件忽略
+        return InputLayout(BATCH, len(children), root_dicoms, "mixed_root")
+    if not children:
+        return InputLayout(EMPTY, 0, 0, "no_pid")
+    if len(children) > MAX_DETECT_CHILDREN:
+        return InputLayout(BATCH, len(children), 0, "many_children")
+    if not child_pids:
+        return InputLayout(BATCH, len(children), 0, "no_pid")
+    if len(set(child_pids)) == 1:
+        # 子文件夹都是同一个患者（系列 / 检查），按批量也能合并成一个编号；提示可以改成单个患者
+        return InputLayout(BATCH, len(children), 0, "same_patient")
+    return InputLayout(BATCH, len(children), 0, "")
+
+
 # ---------------------------------------------------------------- 处理
 
 def _study_date(rec):
@@ -693,9 +823,11 @@ def unique_path(path):
 
 class Job:
     def __init__(self, input_dir, output_dir, mapping_path, log=print, progress=None, confirm=None, workers=None,
-                 control=None, exclude_burned_in=True):
+                 control=None, exclude_burned_in=True, single_patient=None):
         self.control = control or Control()
         self.exclude_burned_in = exclude_burned_in  # 疑似烧录文字的序列（截图、三维渲染、剂量报告）不输出
+        # None = 自动判断选中的文件夹是“批量”还是“单个患者”；True/False = 用户指定
+        self.single_patient = single_patient
         self.workers = max(1, int(workers or MAX_WORKERS))
         self.input_dir = Path(input_dir).resolve()
         self.output_dir = Path(output_dir).resolve()
@@ -771,16 +903,39 @@ class Job:
             self.log(f"映射表已备份：{backup}")
 
         entries = sorted(self.input_dir.iterdir(), key=lambda p: p.name)
-        folders = [p for p in entries if p.is_dir() and not p.name.startswith(".")]
-        loose = [p for p in entries if p.is_file() and p.name not in IGNORED_NAMES and not p.name.startswith(".")]
-        if loose:
-            self.log(f"[警告] 输入文件夹根目录下有 {len(loose)} 个散落文件，不属于任何患者文件夹，已忽略")
-        if not folders:
-            self.log("[错误] 输入文件夹下没有子文件夹")
-            return False
+        # 0. 选中的文件夹是“批量”还是“单个患者”（界面 / 命令行可以指定，默认自动判断）
+        auto = self.single_patient is None
+        if auto:
+            layout = detect_input_mode(self.input_dir)
+            single = layout.mode == SINGLE
+        else:
+            layout, single = None, bool(self.single_patient)
+        self.single_patient = single
+        if single:
+            folders = [self.input_dir]
+            loose = []
+            why = ""
+            if auto and layout is not None:
+                why = {"root_dicoms": "：文件夹里直接有 DICOM 文件",
+                       "same_patient": "：各子文件夹里的 DICOM 属于同一个患者"}.get(layout.reason, "")
+            self.log(f"模式：单个患者（把选中的文件夹「{self.input_dir.name}」当作一个患者{why}）")
+        else:
+            folders = [p for p in entries if p.is_dir() and not p.name.startswith(".")]
+            loose = [p for p in entries if p.is_file() and p.name not in IGNORED_NAMES and not p.name.startswith(".")]
+            if loose:
+                self.log(f"[警告] 输入文件夹根目录下有 {len(loose)} 个散落文件，不属于任何患者文件夹，已忽略")
+            if not folders:
+                if layout is not None and layout.reason == "mixed_root":
+                    self.log("[错误] 选中的文件夹根目录下直接放着多个患者的 DICOM 文件，不能按单个患者处理；"
+                             "也没有子文件夹，不能按批量处理。请把每个患者的文件分别放进各自的文件夹，"
+                             "或选“装着各个患者文件夹”的那一层。")
+                else:
+                    self.log("[错误] 输入文件夹下没有子文件夹。只处理一个患者时，请把那个患者文件夹选上"
+                             "（软件会自动识别），或勾选界面的“只处理一个患者”，命令行加 --single-patient")
+                return False
 
         # 1. 扫描
-        self.log(f"\n== 扫描 {len(folders)} 个文件夹 ==")
+        self.log("\n== 扫描（单个患者）==" if single else f"\n== 扫描 {len(folders)} 个文件夹 ==")
         # 各文件夹并行列出文件；列完一个，就把它的文件切成小块并行读文件头（大文件夹不会拖在最后）
         ctl = self.control
         parts, nparts, list_errors = defaultdict(dict), {}, {}
@@ -825,6 +980,20 @@ class Job:
             return False
         scans.sort(key=lambda s: s.name)
 
+        # 单患者模式：扫完发现不止一个患者 ID 时直接拒绝。绝不能把不同患者混进同一个编号
+        # （自动判断也可能看走眼，比如平铺文件夹里混了别人的文件；手动指定也一样对待）。
+        if single:
+            mixed = [s for s in scans if len(s.patient_ids) > 1]
+            if mixed:
+                for s in mixed:
+                    detail = "、".join(f"{pid}（{n} 个文件）" for pid, n in s.patient_ids.most_common(10))
+                    self.log(f"[错误] 选中的文件夹里有 {len(s.patient_ids)} 个不同的患者 ID：{detail}")
+                self.log("为避免把不同患者混进同一个编号，已停止，没有写出任何文件。")
+                self.log("如果这是多个患者的数据：请选“装着各个患者文件夹”的那一层（每个子文件夹一个患者），"
+                         "或者分别选每个患者自己的文件夹；也可以取消勾选“只处理一个患者”按批量处理。")
+                self._flush_log()
+                return False
+
         # 2. 分配编号
         existing = mapping.code_by_patient_id()
         by_folder = {str(r["原文件夹"]): r["编号"] for r in mapping.rows()}
@@ -850,7 +1019,10 @@ class Job:
                 by_pid[pid] = code
             groups[code].append(s)
 
-        lines = [f"共 {len(scans)} 个文件夹，将生成 {len(groups)} 个患者编号："]
+        if single:
+            lines = [f"模式：单个患者 —— 把选中的文件夹「{self.input_dir.name}」当作一个患者处理。"]
+        else:
+            lines = [f"共 {len(scans)} 个文件夹，将生成 {len(groups)} 个患者编号："]
         for code, ss in groups.items():
             for s in ss:
                 tag = "（沿用已有编号）" if s.patient_id in existing else ""
@@ -906,7 +1078,7 @@ class Job:
         total_files = sum(len(s.files) for ss in groups.values() for s in ss)
         self.run_id = new_run_id()
         self.stats = {"folders": len(scans), "patients": len(groups), "skipped": len(skipped),
-                      "files_total": total_files}
+                      "files_total": total_files, "single_patient": single}
         warn = record(self.run_id, "start", kind="脱敏", input=str(self.input_dir), output=str(self.output_dir),
                       mapping=str(self.mapping_path), log=str(self.log_path), workers=self.workers,
                       exclude_burned_in=self.exclude_burned_in, **self.stats)

@@ -34,7 +34,7 @@ class HistoryWindow:
         titles.pack(side="left")
         ttk.Label(titles, text="处理记录", style="BgTitle.TLabel").pack(anchor="w")
         ttk.Label(titles, style="BgHint.TLabel",
-                  text=f"共 {len(self.runs)} 次 · 只记时间、路径和数量，不含患者信息（每个患者的明细在映射表里）"
+                  text=f"共 {len(self.runs)} 次 · 只记时间、路径和数量，不含患者姓名/ID（每个患者的明细在映射表里）"
                   ).pack(anchor="w", pady=(2, 0))
         ttk.Button(head, text="用主窗口当前路径核对", style="Small.TButton",
                    command=self.check_current_paths).pack(side="right", anchor="s")
@@ -222,7 +222,8 @@ class HistoryWindow:
         if not (inp and mp):
             messagebox.showwarning("提示", "请先在主窗口填好原始数据文件夹和映射表", parent=self.win)
             return
-        self.show_folder_status({"input": inp, "mapping": mp})
+        self.show_folder_status({"input": inp, "mapping": mp,
+                                 "single_patient": bool(self.app.single_var.get())})
 
     def show_folder_status(self, r=None):
         r = r or self._run()
@@ -234,8 +235,9 @@ class HistoryWindow:
             return
         if self._read_mapping_rows(r) is None:
             return
+        single = bool(r.get("single_patient"))
         try:
-            items = folder_status(inp, r["mapping"])
+            items = folder_status(inp, r["mapping"], single_patient=single)
         except Exception as e:
             messagebox.showwarning("提示", f"核对失败：{e}", parent=self.win)
             return
@@ -253,10 +255,16 @@ class HistoryWindow:
                                                      row.get("处理时间") or "", row.get("备注") or ""),
                                   tags=({0: "bad", 1: "warn", 2: "good"}[order],))
         self._stripe(self.detail_tv)
-        self.detail_title.config(
-            style="CardTitle.TLabel",
-            text=f"{inp} 现有 {len(items)} 个子文件夹：已完成 {n_done}，未完成/失败 {n_todo}，从未处理 {n_new}。"
-                 f"（用这个映射表核对）")
+        if single:
+            self.detail_title.config(
+                style="CardTitle.TLabel",
+                text=f"{inp} 按单个患者模式处理：已完成 {n_done}，未完成/失败 {n_todo}，从未处理 {n_new}。"
+                     f"（用这个映射表核对）")
+        else:
+            self.detail_title.config(
+                style="CardTitle.TLabel",
+                text=f"{inp} 现有 {len(items)} 个子文件夹：已完成 {n_done}，未完成/失败 {n_todo}，从未处理 {n_new}。"
+                     f"（用这个映射表核对）")
 
     @staticmethod
     def _state(row):
@@ -280,6 +288,8 @@ class HistoryWindow:
         self.app.in_var.set(r.get("input", ""))
         self.app.out_var.set(r.get("output", ""))
         self.app.map_var.set(r.get("mapping", ""))
+        if "single_patient" in r:  # 连同“批量 / 单个患者”模式一起恢复
+            self.app.restore_mode(bool(r.get("single_patient")))
         messagebox.showinfo("已填入", "已把这次的三个路径填到主窗口。\n\n点“开始脱敏”会接着处理："
                                       "已完成的文件直接跳过，不会覆盖。", parent=self.win)
 

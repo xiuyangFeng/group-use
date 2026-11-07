@@ -30,6 +30,14 @@ N=$(find "$T/out" -name '*.dcm' | wc -l | tr -d ' ')
 [ "$N" -ge 10 ] || { echo "[错误] 自检失败：只写出 $N 个文件"; exit 1; }
 echo "自检通过：写出 $N 个文件"
 
+# 单患者模式自检：直接选一个患者文件夹（平铺结构），应自动识别成一个患者
+DEID_HOME="$T/home" "${RUN[@]}" "$APP/Contents/MacOS/CT_Deid" \
+  --input "$T/input/WANG_WU_1" --output "$T/out_one" --mapping "$T/local/map_one.xlsx" --yes --workers 2 >/dev/null
+N1=$(find "$T/out_one/P0001" -name '*.dcm' 2>/dev/null | wc -l | tr -d ' ')
+[ "$N1" -ge 1 ] && [ ! -d "$T/out_one/P0002" ] \
+  || { echo "[错误] 单患者模式自检失败：P0001 写出 $N1 个文件"; exit 1; }
+echo "单患者模式自检通过：写出 $N1 个文件"
+
 mkdir -p release
 STAGE=$(mktemp -d)/CT_Deid_Mac_$NAME
 mkdir -p "$STAGE"

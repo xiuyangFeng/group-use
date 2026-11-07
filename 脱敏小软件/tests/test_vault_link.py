@@ -156,14 +156,15 @@ def test_gui_path_hints(tmp_path):
     make_fake_data.main(tmp_path / "input")
     locked = fake_vault(tmp_path / "锁着", "LOCKED")
     opened = fake_vault(tmp_path / "开着")
-    res = check_paths(str(tmp_path / "input"), str(opened / "out"), str(locked / "m.xlsx"))
+    res, layout, single = check_paths(str(tmp_path / "input"), str(opened / "out"), str(locked / "m.xlsx"))
+    assert layout.mode == "batch" and single is False
     assert res[0][0] == "ok"
     assert res[1][0] == "warn" and "锁回时脱敏结果也会被加密" in res[1][1]
     assert res[2][0] == "error" and "已上锁" in res[2][1]
-    res = check_paths(str(tmp_path / "input"), str(tmp_path / "out"), str(opened / "m.xlsx"))
+    res, _, _ = check_paths(str(tmp_path / "input"), str(tmp_path / "out"), str(opened / "m.xlsx"))
     assert res[2][0] == "ok" and "处理期间不会自动上锁" in res[2][1]
     # 输出和原始数据互相包含这种错误，不能被“在保险箱里”的提醒盖掉
-    res = check_paths(str(opened), str(opened / "sub"), "")
+    res, _, _ = check_paths(str(opened), str(opened / "sub"), "")
     assert res[1][0] == "error" and "互相包含" in res[1][1]
 
 

@@ -29,7 +29,11 @@ jobs:
           cache: pip
           cache-dependency-path: 脱敏小软件/requirements.txt
       - run: pip install -r requirements.txt pyinstaller pytest numpy
-      - run: python -m pytest -q tests
+      - name: Run tests
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
+        run: python -m pytest -q tests
       - run: pyinstaller --noconfirm --clean --onefile --windowed --name CT_Deid app.py
 
       # 用打包好的 exe（而不是源码）跑一遍完整脱敏，确认多进程、写映射表在打包后都正常
@@ -47,6 +51,21 @@ jobs:
           if ($n -lt 10) { throw "only $n dcm files written" }
           if (-not (Test-Path smoke/local/map.xlsx)) { throw "mapping not written" }
           "OK: $n files"
+
+      # 单患者模式：直接选一个患者文件夹（平铺导出），应自动识别成一个患者
+      - name: Smoke test single patient
+        shell: pwsh
+        env:
+          DEID_HOME: "${{ runner.temp }}\\deid_home"
+          PYTHONIOENCODING: utf-8
+        run: |
+          $p = Start-Process dist/CT_Deid.exe -Wait -PassThru -ArgumentList `
+            '--input','smoke/input/WANG_WU_1','--output','smoke/out_one','--mapping','smoke/local/map_one.xlsx','--yes','--workers','2'
+          if ($p.ExitCode -ne 0) { throw "exe exit code $($p.ExitCode)" }
+          $n = (Get-ChildItem smoke/out_one/P0001 -Recurse -Filter *.dcm).Count
+          if ($n -lt 1) { throw "single patient mode wrote only $n dcm files" }
+          if (Test-Path smoke/out_one/P0002) { throw "single patient mode created P0002" }
+          "OK: single patient $n files"
 
       # 用 Python 的 zipfile 打包：中文文件名会带 UTF-8 标记，解压后不乱码（Compress-Archive 不带）
       - name: Package

@@ -21,7 +21,7 @@ def main():
     from deid.pipeline import Job
 
     ap = argparse.ArgumentParser(description="CT DICOM 数据脱敏")
-    ap.add_argument("--input", help="原始数据文件夹（每个子文件夹一个患者）")
+    ap.add_argument("--input", help="原始数据文件夹（批量：每个子文件夹一个患者；只处理一个患者时直接选那个患者文件夹）")
     ap.add_argument("--output", help="脱敏后输出文件夹")
     ap.add_argument("--mapping", help="映射表 .xlsx 路径（留在本地）")
     ap.add_argument("--yes", action="store_true", help="不询问，直接处理")
@@ -31,7 +31,13 @@ def main():
     ap.add_argument("--history", action="store_true", help="查看以前的处理记录")
     ap.add_argument("--keep-burned-in", action="store_true",
                     help="保留疑似图像内烧录文字的序列（默认排除：截图、三维渲染图、剂量报告等）")
+    layout = ap.add_mutually_exclusive_group()
+    layout.add_argument("--single-patient", action="store_true",
+                        help="选中的文件夹本身就是一个患者（默认自动判断）")
+    layout.add_argument("--batch", action="store_true",
+                        help="每个子文件夹是一个患者（默认自动判断）")
     args = ap.parse_args()
+    single = True if args.single_patient else False if args.batch else None  # None = 自动判断
 
     if args.history:
         from deid.history import history_path, load_runs, summarize
@@ -43,7 +49,8 @@ def main():
     if args.probe:
         from deid.probe import ReportSaveError, probe_to_file
         try:
-            text = probe_to_file(args.probe, args.report, workers=args.workers)  # 报告已存在则报错，不覆盖
+            text = probe_to_file(args.probe, args.report, workers=args.workers,
+                                 single_patient=single)  # 报告已存在则报错，不覆盖
         except ReportSaveError as e:
             print(e.text)
             print(f"\n{e}\n报告内容已打印在上面，可以复制保存，或换个 --report 位置重跑。")
@@ -58,7 +65,7 @@ def main():
         return args.yes or input("\n确认开始处理？[y/N] ").strip().lower() == "y"
 
     ok = Job(args.input, args.output, args.mapping, confirm=confirm, workers=args.workers,
-             exclude_burned_in=not args.keep_burned_in).run()
+             exclude_burned_in=not args.keep_burned_in, single_patient=single).run()
     sys.exit(0 if ok else 1)
 
 
