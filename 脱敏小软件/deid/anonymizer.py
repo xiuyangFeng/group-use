@@ -5,7 +5,7 @@ import re
 from collections import Counter
 from datetime import date
 
-from pydicom.datadict import dictionary_VR, keyword_for_tag
+from pydicom.datadict import dictionary_VR, keyword_for_tag, tag_for_keyword
 from pydicom.dataelem import DataElement
 from pydicom.dataset import Dataset
 from pydicom.multival import MultiValue
@@ -15,6 +15,21 @@ from . import rules
 
 TEXT_VRS = {"LO", "SH", "LT", "ST", "UT", "UC"}
 DEID_METHOD = "PS3.15 E.1 Basic Profile; Retain Patient Chars; Dates removed"
+
+# 下面几个缓存/预计算表让逐字段脱敏和校验快一些（字段号固定，程序运行期间不会变）：
+# 规则表按字段名写，这里预先换成字段号；隐式 VR 文件查字典的结果也缓存起来。
+_REMOVE_TAGS = frozenset(t for t in (tag_for_keyword(k) for k in rules.REMOVE) if t is not None)
+_EMPTY_TAGS = frozenset(t for t in (tag_for_keyword(k) for k in rules.EMPTY) if t is not None)
+_DICT_VR_CACHE = {}
+_KEYWORD_CACHE = {}
+_PATIENT_ID_TAG = (0x0010, 0x0020)
+
+
+def _keyword(tag):
+    kw = _KEYWORD_CACHE.get(tag)
+    if kw is None:
+        kw = _KEYWORD_CACHE[tag] = keyword_for_tag(tag)
+    return kw
 
 _CJK = re.compile(r"[㐀-鿿豈-﫿]")
 
@@ -130,10 +145,13 @@ def element_vr(ds, tag):
     """不解码字段值就拿到 VR。隐式 VR 文件里原始字段没有 VR，查字典；查不到当作 UN。"""
     vr = ds.get_item(tag).VR
     if vr is None:
-        try:
-            vr = dictionary_VR(tag)
-        except KeyError:
-            vr = "UN"
+        vr = _DICT_VR_CACHE.get(tag)
+        if vr is None:
+            try:
+                vr = dictionary_VR(tag)
+            except KeyError:
+                vr = "UN"
+            _DICT_VR_CACHE[tag] = vr
     return vr
 
 
@@ -155,6 +173,38 @@ def _contains_needle(value, needles_lower):
     return any(n in text for n in needles_lower)
 
 
+def clean_dataset(d, uid_map, needles_lower, cleaned):
+    """按“字段号 + VR”原地脱敏一个数据集（anonymize 和快速路径共用，保持行为完全一致）。
+
+    只解码需要看内容的字段（UID、自由文本、嵌套序列），数值/像素/私有大字段原样保留或直接删除。
+    """
+    for tag in list(d.keys()):
+        if is_dropped_group(tag.group):
+            del d[tag]
+            continue
+        vr = element_vr(d, tag)
+        if tag in _REMOVE_TAGS or vr == "UN":
+            del d[tag]
+        elif tag in _EMPTY_TAGS or vr in ("PN", "DA", "DT", "AE"):
+            if not raw_is_empty(d, tag):
+                d[tag] = DataElement(tag, vr, "")
+        elif vr == "UI":
+            elem = d[tag]
+            if elem.value and not _keep_uid(_keyword(tag), elem.value):
+                if isinstance(elem.value, (list, MultiValue)):
+                    elem.value = [uid_map(v) for v in elem.value]
+                else:
+                    elem.value = uid_map(elem.value)
+        elif vr == "SQ":
+            for item in d[tag].value:
+                clean_dataset(item, uid_map, needles_lower, cleaned)
+        elif vr in TEXT_VRS and needles_lower and tag != _PATIENT_ID_TAG:  # PatientID 随后换成编号
+            elem = d[tag]
+            if elem.value and _contains_needle(elem.value, needles_lower):
+                cleaned[_keyword(tag) or str(tag)] += 1
+                elem.value = ""
+
+
 def anonymize(ds: Dataset, code: str, uid_map: UidMapper, needles=()):
     """原地脱敏。返回 Counter：被清空的、含患者姓名/ID 的自由文本字段名 → 次数。"""
     needles_lower = [n.lower() for n in needles]
@@ -164,35 +214,7 @@ def anonymize(ds: Dataset, code: str, uid_map: UidMapper, needles=()):
 
     # 只按“字段号 + VR”做决定，绝大多数字段（数值、像素、私有大字段）不解码，原样写回或直接删除。
     # 只有 UID、自由文本、嵌套序列这些需要看内容的字段才解码。规则和逐个解码时完全一样。
-    def clean(d):
-        for tag in list(d.keys()):
-            if is_dropped_group(tag.group):
-                del d[tag]
-                continue
-            kw = keyword_for_tag(tag)
-            vr = element_vr(d, tag)
-            if kw in rules.REMOVE or vr == "UN":
-                del d[tag]
-            elif kw in rules.EMPTY or vr in ("PN", "DA", "DT", "AE"):
-                if not raw_is_empty(d, tag):
-                    d[tag] = DataElement(tag, vr, "")
-            elif vr == "UI":
-                elem = d[tag]
-                if elem.value and not _keep_uid(kw, elem.value):
-                    if isinstance(elem.value, (list, MultiValue)):
-                        elem.value = [uid_map(v) for v in elem.value]
-                    else:
-                        elem.value = uid_map(elem.value)
-            elif vr == "SQ":
-                for item in d[tag].value:
-                    clean(item)
-            elif vr in TEXT_VRS and needles_lower and kw != "PatientID":  # PatientID 随后换成编号
-                elem = d[tag]
-                if elem.value and _contains_needle(elem.value, needles_lower):
-                    cleaned[kw or str(tag)] += 1
-                    elem.value = ""
-
-    clean(ds)
+    clean_dataset(ds, uid_map, needles_lower, cleaned)
 
     ds.PatientName = code
     ds.PatientID = code

@@ -27,7 +27,8 @@ def main():
     ap.add_argument("--yes", action="store_true", help="不询问，直接处理")
     ap.add_argument("--probe", help="只做结构探查，不修改任何数据")
     ap.add_argument("--report", default="结构探查报告.txt", help="结构探查报告保存位置")
-    ap.add_argument("--workers", type=int, default=None, help="并行进程数（默认 4）")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="并行进程数（默认用满本机核心，最多 12）")
     ap.add_argument("--history", action="store_true", help="查看以前的处理记录")
     ap.add_argument("--keep-burned-in", action="store_true",
                     help="保留疑似图像内烧录文字的序列（默认排除：截图、三维渲染图、剂量报告等）")

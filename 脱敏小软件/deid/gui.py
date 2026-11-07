@@ -568,8 +568,10 @@ class App:
         self.workers_sb = ttk.Spinbox(line, from_=1, to=max(16, os.cpu_count() or 4), width=4,
                                       textvariable=self.workers_var)
         self.workers_sb.pack(side="left", padx=(10, 10))
-        ttk.Label(line, style="Hint.TLabel", text=f"本机 {os.cpu_count()} 核").pack(side="left")
-        hint = ttk.Label(body, style="Hint.TLabel", text="数据和输出都在固态硬盘上可调到 6–8；机械硬盘、U 盘、网络盘建议 2–4",
+        ttk.Label(line, style="Hint.TLabel",
+                  text=f"本机 {os.cpu_count()} 核 · 默认用满").pack(side="left")
+        hint = ttk.Label(body, style="Hint.TLabel",
+                         text="默认用满本机核心，一般不用改；机械硬盘、U 盘、网络盘建议调小到 2–4（开太多反而因为磁盘寻道变慢）",
                          justify="left")
         hint.pack(anchor="w", pady=(4, 0))
         theme.autowrap(hint, c, theme.scaled(self.root, 44))
