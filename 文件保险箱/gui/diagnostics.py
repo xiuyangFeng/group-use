@@ -55,6 +55,16 @@ def run(out_dir: str | None = None) -> int:
         f"数据目录：{data_dir}",
         f"数据目录存在：{data_dir.is_dir()}",
     ]
+    try:
+        from core import native
+
+        eng = native.info()
+        if eng["engine"] == "C++":
+            info.append(f"加密引擎：C++ {eng['version']}（{eng['impl']}，自检 {eng['selftest']}）")
+        else:
+            info.append(f"加密引擎：Python（C++ 引擎没加载：{eng.get('reason', '')}）")
+    except Exception as exc:  # noqa: BLE001 —— 诊断包不能因为这个失败
+        info.append(f"加密引擎：查询失败（{exc}）")
     for name, keys in [
         ("config.json", ["auto_lock_minutes", "minimize_to_tray", "version"]),
         ("audit.jsonl", []),

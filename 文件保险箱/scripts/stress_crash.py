@@ -57,11 +57,12 @@ STATE_UNLOCKED = "UNLOCKED"
 
 
 class Runner:
-    def __init__(self, root: Path, audit_dir: Path, python: Path):
+    def __init__(self, root: Path, audit_dir: Path, python: Path, rng: random.Random | None = None):
         self.root = root
         self.audit_dir = audit_dir
         self.python = python
         self.runs = 0
+        self.rng = rng or random.Random(0)
 
     def run(self, args: list[str], *, stdin: str = PASSWORD + "\n", crash_at: str | None = None):
         env = {
@@ -71,6 +72,9 @@ class Runner:
         }
         if crash_at:
             env["FDVAULT_CRASH_AT"] = crash_at
+        # 两种解锁方式都要压：保留密文（默认）/ 空间不够时边解边删密文
+        keep = self.rng.random() >= 0.3 and not (crash_at and "unlink_blob" in crash_at)
+        env["FDVAULT_KEEP_CIPHERTEXT"] = "1" if keep else "0"
         cmd = [str(self.python), "-m", "cli.main", *args, "--audit-dir", str(self.audit_dir)]
         self.runs += 1
         return subprocess.run(
@@ -136,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     expected = snapshot(root)
 
     rng = random.Random(args.seed)
-    runner = Runner(root, audit_dir, python)
+    runner = Runner(root, audit_dir, python, rng)
 
     r = runner.run(["create", str(root), "--password-stdin", "--yes", "--no-progress"], stdin=PASSWORD + "\n" + QUESTIONS_STDIN)
     assert r.returncode == 0, r.stderr
@@ -200,6 +204,14 @@ def main(argv: list[str] | None = None) -> int:
         if snapshot(root) != expected:
             stats["mismatches"].append({"round": i, "when": "after_unlock_recover"})
 
+        if runner.state() == STATE_UNLOCKED and rng.random() < 0.5:
+            # 原样重写几个文件再把时间改回去：内容和快照都不变，但状态改变时间变了 →
+            # 上锁要走「重新加密」而不是直接用保留的密文
+            files = sorted(p for p in root.rglob("*") if p.is_file() and ".vault" not in p.parts and p.name != "如何解锁.txt")
+            for p in rng.sample(files, min(2, len(files))):
+                st = p.stat()
+                p.write_bytes(p.read_bytes())
+                os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
         crash_and_recover("lock")
         if runner.state() == STATE_UNLOCKED:
             if snapshot(root) != expected:

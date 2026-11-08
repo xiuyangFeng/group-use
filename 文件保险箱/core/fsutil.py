@@ -13,45 +13,67 @@ from pathlib import Path
 IS_WINDOWS = os.name == "nt"
 
 def _busy_windows(paths: list[Path]) -> list[Path]:
-    """Windows：以读写方式打开失败（共享冲突）但文件本身可写 → 认为被占用。"""
-    busy: list[Path] = []
-    for p in paths:
+    """Windows：以读写方式打开失败（共享冲突）但文件本身可写 → 认为被占用。
+
+    文件多时并行检查（每次打开都要过一遍杀毒软件，串行 2 万个文件要好几秒）。"""
+
+    def one(p: Path) -> bool:
         try:
             fd = os.open(str(p), os.O_RDWR)
         except PermissionError:
-            if os.access(str(p), os.W_OK):
-                busy.append(p)
+            return os.access(str(p), os.W_OK)
         except OSError:
-            continue
-        else:
-            os.close(fd)
-    return busy
+            return False
+        os.close(fd)
+        return False
+
+    if len(paths) < 64:
+        flags = [one(p) for p in paths]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 4) * 2)) as ex:
+            flags = list(ex.map(one, paths, chunksize=64))
+    return [p for p, busy in zip(paths, flags) if busy]
 
 
 def _busy_macos(paths: list[Path]) -> list[Path]:
-    """macOS：用 lsof 查询（Excel、Preview 等会持有文件）。"""
+    """macOS：用 lsof 查询（Excel、Preview 等会持有文件）。
+
+    只跑一次 lsof 列出所有打开的文件，再和要上锁的文件比对：按 200 个一组传路径给 lsof，
+    2 万个文件要跑 100 次、十几秒；整表一次只要零点几秒。"""
     import subprocess
 
-    busy_names: set[str] = set()
-    for i in range(0, len(paths), 200):
-        chunk = [str(p) for p in paths[i : i + 200]]
-        try:
-            proc = subprocess.run(
-                ["lsof", "-n", "-P", "-F", "n", "--", *chunk],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return []
-        if proc.returncode not in (0, 1):
-            return []
-        for line in proc.stdout.splitlines():
-            if line.startswith("n"):
-                # lsof 输出的是解析过符号链接的真实路径（/var → /private/var），
-                # 两边都做 realpath 再比，否则 /tmp、外接盘等路径会漏检
-                busy_names.add(os.path.realpath(line[1:]))
-    return [p for p in paths if os.path.realpath(str(p)) in busy_names]
+    if not paths:
+        return []
+    try:
+        proc = subprocess.run(
+            ["lsof", "-n", "-P", "-w", "-F", "n"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode not in (0, 1):
+        return []
+    # lsof 输出的是解析过符号链接的真实路径（/var → /private/var），
+    # 这边也做 realpath 再比，否则 /tmp、外接盘等路径会漏检
+    # 每个目录只做一次 realpath（2 万个文件逐个 realpath 要几十万次 lstat）；
+    # 文件本身不是符号链接（扫描时已排除），所以「目录真实路径 + 文件名」就是文件的真实路径
+    real_dirs: dict[str, str] = {}
+    keys: list[str] = []
+    for p in paths:
+        d, name = os.path.split(str(p))
+        rd = real_dirs.get(d)
+        if rd is None:
+            rd = real_dirs[d] = os.path.realpath(d)
+        keys.append(os.path.join(rd, name))
+    wanted = set(keys)
+    busy_names = {line[1:] for line in proc.stdout.splitlines() if line.startswith("n") and line[1:] in wanted}
+    return [p for p, k in zip(paths, keys) if k in busy_names]
 
 
 def busy_files(paths: list[Path]) -> list[Path]:

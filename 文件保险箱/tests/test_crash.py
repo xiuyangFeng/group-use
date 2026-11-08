@@ -44,6 +44,9 @@ def _create(root, audit_dir):
 
 def _unlock(root, audit_dir, crash_at: str | None = None):
     env = {"FDVAULT_CRASH_AT": crash_at} if crash_at else None
+    if crash_at and "unlink_blob" in crash_at:
+        # 解锁时删密文只在「磁盘不够保留密文」时发生，用开关模拟这种情况
+        env["FDVAULT_KEEP_CIPHERTEXT"] = "0"
     return run_cli(
         ["unlock", str(root), "--password-stdin", "--no-progress"],
         stdin=PASSWORD + "\n",
@@ -89,6 +92,20 @@ def unlocked_case(tmp_path, audit_dir):
     r = _unlock(root, audit_dir)
     assert r.returncode == 0, r.stderr
     assert state_of(root) == "UNLOCKED"
+    # 解锁期间改两个文件：上锁时这两个要重新加密，另外 4 个直接用保留的密文（两条路径都覆盖到）
+    (root / "a.txt").write_bytes(b"edited while unlocked\n")
+    (root / "sub" / "big.bin").write_bytes(b"\x07" * 150_000)
+    expected = snapshot(root)
+    return root, audit_dir, expected
+
+
+@pytest.fixture
+def unlocked_unchanged_case(tmp_path, audit_dir):
+    root = tmp_path / "data"
+    make_tree(root)
+    expected = snapshot(root)
+    _create(root, audit_dir)
+    assert _unlock(root, audit_dir).returncode == 0
     return root, audit_dir, expected
 
 
@@ -202,4 +219,33 @@ def test_recover_with_wrong_password_does_not_touch_data(locked_case):
     assert state_of(root) == "UNLOCKING"
     # 正确密码仍可恢复
     assert _recover(root, audit_dir).returncode == 0
+    assert snapshot(root) == expected
+
+
+# ---------------------------------------------------------------- 上锁快速路径（文件都没改过，直接用保留的密文）
+
+@pytest.mark.parametrize(
+    "crash_at",
+    ["lock:before_manifest_commit=1", "lock:after_manifest_commit=1", "lock:before_unlink_plaintext=3", "lock:after_unlink_plaintext=6"],
+)
+def test_fast_lock_crash_then_continue(unlocked_unchanged_case, crash_at):
+    root, audit_dir, expected = unlocked_unchanged_case
+    r = _lock(root, audit_dir, crash_at=crash_at)
+    assert r.returncode == 70, r.stderr
+    assert state_of(root) == "LOCKING"
+    assert _recover(root, audit_dir).returncode == 0
+    assert state_of(root) == "LOCKED"
+    assert _unlock(root, audit_dir).returncode == 0
+    assert snapshot(root) == expected
+
+
+def test_fast_lock_crash_then_rollback(unlocked_unchanged_case):
+    root, audit_dir, expected = unlocked_unchanged_case
+    assert _lock(root, audit_dir, crash_at="lock:before_unlink_plaintext=3").returncode == 70
+    r = _recover(root, audit_dir, rollback=True)
+    assert r.returncode == 0, r.stderr
+    assert state_of(root) == "UNLOCKED"
+    assert snapshot(root) == expected
+    assert _lock(root, audit_dir).returncode == 0
+    assert _unlock(root, audit_dir).returncode == 0
     assert snapshot(root) == expected

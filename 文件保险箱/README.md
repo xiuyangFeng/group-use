@@ -21,7 +21,7 @@
 
 已完成部分的结论：
 
-- **加密与断电恢复**：198 个自动化测试 + 21 种强制断电场景 + 120 次随机杀进程压力测试全部通过，
+- **加密与断电恢复**：245 个自动化测试 + 21 种强制断电场景 + 120 次随机杀进程压力测试全部通过，
   恢复后数据 **0 字节丢失**（见 [测试报告 M1](docs/测试报告-M1.md)）。
 - **图形界面**：新建向导 → 首次上锁 → 解锁 → 上锁 → 恢复 → 审计全流程跑通；
   25 项 GUI 自检全过（见 [测试报告 M2](docs/测试报告-M2.md)）。
@@ -141,6 +141,10 @@ mkdir -p /tmp/测试保险箱 && echo "机密内容" > /tmp/测试保险箱/患�
    .venv/bin/python scripts/build_app.py
    ```
 
+   需要 CMake 和 C++ 编译器（macOS：`xcode-select --install` + `brew install cmake`；Windows：Visual Studio
+   2019/2022 勾选「使用 C++ 的桌面开发」），脚本会先编译 C++ 加解密引擎再打包。
+   只想从源码运行 / 跑测试时，先执行一次 `python scripts/build_native.py`；没编译时会自动退回 Python 实现（慢很多）。
+
    产物在 `dist/`：
    - macOS：`文件保险箱-x.y.z-macOS-arm64.zip`（拖拽安装）、`...-macOS-arm64.dmg`（双击挂载，拖进 Applications）
    - Windows：`文件保险箱-x.y.z-Windows-x64.zip`
@@ -151,7 +155,7 @@ mkdir -p /tmp/测试保险箱 && echo "机密内容" > /tmp/测试保险箱/患�
 
 2. **GitHub Actions 自动打**：本仓库的 `.github/workflows/build.yml`（单独推本目录时用），
    或组内私有仓库 `group-use` 的 `.github/workflows/build-vault.yml`（同时管两个子项目），
-   每个平台自动跑 198 个测试 + 25 项 GUI 自检 + 打包，产物在 Actions 的 Artifacts / Releases 里。
+   每个平台自动跑 245 个测试 + 25 项 GUI 自检 + 打包，产物在 Actions 的 Artifacts / Releases 里。
 
 安装说明（发给组里同事看）：
 
@@ -170,13 +174,15 @@ mkdir -p /tmp/测试保险箱 && echo "机密内容" > /tmp/测试保险箱/患�
 │   ├── questions.py  密保问题：预设问题、答案规范化、校验
 │   ├── header.py     .vault/header.json 读写
 │   ├── manifest.py   SQLite 元数据（文件名加密）
-│   ├── transform.py  单文件分块加解密
+│   ├── transform.py  密文格式 + 批量加解密接口（C++ 引擎优先，Python 参考实现兜底）
+│   ├── native.py     C++ 加解密引擎的 ctypes 封装
 │   ├── vault.py      状态机：创建/解锁/上锁/恢复/校验
 │   ├── control.py    暂停 / 取消 / 回滚
 │   ├── fsutil.py     原子写、fsync、目录扫描
 │   ├── lockfile.py   跨进程互斥锁
 │   ├── audit.py      审计日志（哈希链）
 │   └── inuse.py      外部程序“正在使用”标记（CT 脱敏工具运行时不让上锁）
+├── native/           C++ 加解密引擎（ChaCha20-Poly1305 + SHA-256，SIMD + 多线程），见技术方案 §16
 ├── cli/              命令行
 ├── installers/       安装说明 / Windows 右键菜单脚本 / macOS 快速操作 .workflow
 ├── assets/           图标（由程序自动生成）
@@ -189,7 +195,7 @@ mkdir -p /tmp/测试保险箱 && echo "机密内容" > /tmp/测试保险箱/患�
 │   ├── selfcheck.py  打包自检（--selftest）
 │   ├── store.py      界面配置、空闲时间检测
 │   └── style.py      配色、控件样式、图标
-├── tests/            198 个自动化测试（含断电注入）
+├── tests/            245 个自动化测试（含断电注入）
 ├── scripts/          压力测试 / 性能测试 / GUI 自检 / 截图 / 打包
 ├── docs/             需求、技术方案、界面草图、测试报告、界面实拍
 └── README.md

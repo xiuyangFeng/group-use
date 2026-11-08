@@ -171,3 +171,44 @@ def test_windows_parent_rule_keeps_siblings_usable_and_is_removed(locked_vault, 
     v.close()
     assert protect._win_everyone_denies(tmp_path) == []
     assert protect._win_everyone_denies(root) == []
+
+
+@pytest.mark.skipif(not protect.IS_WINDOWS, reason="占用句柄只在 Windows 上用")
+def test_windows_hold_blocks_move_even_without_acl(locked_vault, audit_dir, tmp_path):
+    """图形界面持有占用句柄时：就算权限规则被撤掉（模拟 U 盘 / 磁盘根目录），也移不动、改不了名、删不掉。"""
+    root, before, _ = locked_vault
+    elsewhere = tmp_path / "别处"
+    elsewhere.mkdir()
+    protect.enable_holds()
+    try:
+        assert protect.hold(root) and protect.is_held(root)
+        # 撤掉 NTFS 规则，只剩句柄（release 会连句柄一起放掉，所以只撤 icacls 规则）
+        protect._release_windows(root)
+        for dest in (elsewhere / "挪走", root.with_name(root.name + "-改名")):
+            with pytest.raises(OSError):
+                os.rename(root, dest)
+        with pytest.raises(OSError):
+            os.rmdir(root)
+
+        # 程序自己解锁：先放句柄，解锁后不再持有；上锁后重新持有
+        v = Vault(root, audit_dir=audit_dir)
+        v.unlock(password=PASSWORD)
+        assert not protect.is_held(root)
+        assert snapshot(root) == before
+        v.lock(password=PASSWORD)
+        v.close()
+        assert protect.is_held(root)
+
+        protect.sync_holds([])  # 列表里没有了 → 放掉
+        assert not protect.is_held(root)
+    finally:
+        protect.enable_holds(False)
+        protect.release_tree(tmp_path)
+
+
+def test_holds_are_noop_unless_enabled(locked_vault):
+    root, _, _ = locked_vault
+    assert protect.hold(root) is False  # 命令行 / 测试默认不持有
+    assert not protect.is_held(root)
+    protect.sync_holds([root])
+    assert not protect.is_held(root)

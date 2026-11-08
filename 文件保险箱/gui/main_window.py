@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from core import constants as C, fsutil
-from core import inuse
+from core import inuse, protect
 from core.control import OperationControl
 from core.errors import AnswerError, PasswordError, RecoveryKeyError, VaultError
 from core.vault import Vault
@@ -510,6 +510,9 @@ class MainWindow(QMainWindow):
                 gl.addWidget(card)
             self.list_layout.insertWidget(self.list_layout.count() - 1, group)
             self.list_layout.insertSpacing(self.list_layout.count() - 1, 10)
+
+        # Windows：已上锁的保险箱持有占用句柄（不能移动 / 改名 / 删除）；解锁了的、移出列表的放掉
+        protect.sync_holds([c.info["path"] for c in self.cards if c.info["state"] == C.LOCKED])
 
         if any(c.info["state"] == C.UNLOCKED for c in self.cards):
             idle = idle_seconds()  # 新建的行马上显示倒计时，不用等下一秒

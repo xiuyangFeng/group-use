@@ -7,8 +7,14 @@ __pycache__/
 *.pyc
 .pytest_cache/
 build/
+# C++ 引擎编译产物（scripts/build_native.py 生成）
+core/_native/
+native/build/
 dist/
 .build/
+# C++ 引擎编译产物（scripts/build_native.py 生成）
+core/_native/
+native/build/
 assets/
 *.spec
 # 保险箱测试数据

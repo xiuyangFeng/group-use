@@ -122,6 +122,16 @@ def run(report_path: str | None = None) -> int:
 
     _say("== 真实参数端到端 ==")
 
+    def _native_engine():
+        from core import native
+
+        info = native.info()
+        assert info["engine"] == "C++", f"C++ 加解密引擎没加载，退回了 Python：{info.get('reason')}"
+        assert info["selftest"] == "ok", f"C++ 引擎自检：{info['selftest']}"
+        _say(f"    引擎：{info['impl']}")
+
+    _check("C++ 加解密引擎已加载且自检通过", _native_engine)
+
     def _create():
         v = Vault(root, audit_dir=audit_dir)
         info = v.create(PASSWORD, QUESTIONS)

@@ -44,11 +44,14 @@ from .fsutil import FsEntry, long_path
 from .header import Header, load_header, now_iso, save_header
 from .journal import Journal
 from .lockfile import VaultLock
-from .manifest import FileEntry, Manifest
+from .manifest import FileEntry, Kept, Manifest
 
 ProgressFn = Callable[[dict], None]
 Answers = "list[str | None] | None"  # 和 header 里的密保问题一一对应；空的跳过
-BATCH = 32
+BATCH = 512  # 每批最多文件数（一批内由 C++ 引擎并行处理）
+BATCH_MIN_BYTES = 64 * 1024 * 1024
+BATCH_MAX_BYTES = 2 * 1024 * 1024 * 1024
+KEEP_MARGIN_BYTES = 1024 * 1024 * 1024  # 解锁时保留密文所需的额外余量
 IN_PROGRESS = (C.LOCKING, C.UNLOCKING, C.INCONSISTENT)
 
 
@@ -72,11 +75,6 @@ def locked(method):
             self._release()
 
     return wrapper
-
-
-def chunked(seq: list, n: int) -> Iterable[list]:
-    for i in range(0, len(seq), n):
-        yield seq[i : i + n]
 
 
 class Vault:
@@ -118,6 +116,7 @@ class Vault:
             return
         if h is not None and h.state == C.LOCKED:
             protect.apply(self.root)
+            protect.hold(self.root)  # Windows 图形界面：占用句柄，程序开着时谁都挪不走
 
     def ensure_protected(self) -> bool:
         """旧版本上锁的保险箱没有保护：补上。返回现在是否受保护。"""
@@ -504,13 +503,13 @@ class Vault:
 
         self._precheck_in_use()
         self._open_key(password=password, recovery_key=recovery_key, answers=answers)
-        self._precheck_busy()
+        prescan = self._precheck_busy()
         self._open_session()
         try:
             h.set_state(C.LOCKING)
             self._save_header()
             self._journal.append("begin_lock")
-            stats = self._lock_impl(progress, control=control)
+            stats = self._lock_impl(progress, control=control, prescan=prescan)
             self._record("LOCK", detail=f"{stats['files']} 个文件 / {fsutil.human_bytes(stats['bytes'])}")
             return stats
         finally:
@@ -531,18 +530,22 @@ class Vault:
             "保险箱没有改动，文件还是原样。"
         )
 
-    def _precheck_busy(self) -> None:
-        """上锁前检查文件是否正被其它程序占用（Windows 共享冲突 / macOS lsof）。"""
+    def _precheck_busy(self):
+        """上锁前检查文件是否正被其它程序占用（Windows 共享冲突 / macOS lsof）。
+
+        返回这次的目录扫描结果，上锁时直接复用（免得同一棵树扫两遍）；没扫时返回 None。"""
         if os.environ.get("FDVAULT_SKIP_BUSY_CHECK") == "1":
-            return
+            return None
         try:
-            scan, _, _ = fsutil.scan_tree(self.root, {C.VAULT_DIRNAME, C.MARKER_NAME})
+            result = fsutil.scan_tree(self.root, {C.VAULT_DIRNAME, C.MARKER_NAME})
         except OSError:
-            return
-        paths = [self.root / e.rel for e in scan if not e.is_dir]
+            return None
+        scan = result[0]
+        root_s = os.fspath(self.root)
+        paths = [Path(os.path.join(root_s, fsutil.from_rel(e.rel))) for e in scan if not e.is_dir]
         busy = fsutil.busy_files(paths)
         if not busy:
-            return
+            return result
         names = "、".join(f"「{p.name}」" for p in busy[:5])
         more = "" if len(busy) <= 5 else f" 等 {len(busy)} 个文件"
         raise VaultError(
@@ -551,10 +554,13 @@ class Vault:
             "保险箱没有改动，文件还是原样。"
         )
 
-    def _lock_impl(self, progress: ProgressFn | None, skipped: list[str] | None = None, control: OperationControl | None = None) -> dict:
+    def _lock_impl(self, progress: ProgressFn | None, skipped: list[str] | None = None, control: OperationControl | None = None, prescan=None) -> dict:
         manifest = self._open_manifest()
         journal = self._open_journal()
-        scan, total_bytes, skipped_now = fsutil.scan_tree(self.root, {C.VAULT_DIRNAME, C.MARKER_NAME})
+        if prescan is not None:
+            scan, total_bytes, skipped_now = prescan
+        else:
+            scan, total_bytes, skipped_now = fsutil.scan_tree(self.root, {C.VAULT_DIRNAME, C.MARKER_NAME})
         skipped = skipped_now if skipped is None else skipped
         max_file = max((e.size for e in scan if not e.is_dir), default=0)
         self._ensure_space(2 * max_file + C.SPACE_RESERVE_BYTES)
@@ -586,6 +592,7 @@ class Vault:
         by_path = {e.path: e for e in existing}
         keep: set[str] = set()
         result: dict[str, FileEntry] = {}
+        changed: list[FileEntry] = []
         for se in scan:
             keep.add(se.rel)
             e = by_path.get(se.rel)
@@ -609,35 +616,71 @@ class Vault:
                 e.mode = se.mode
                 e.sha256 = b""
                 e.state = C.ST_DIR if se.is_dir else C.ST_PENDING_LOCK
-                manifest.update(e)
+                changed.append(e)
             result[se.rel] = e
-        for path, e in by_path.items():
-            if path not in keep:
-                manifest.delete(e.uuid)
+        manifest.update_meta_many(changed)  # 路径没变，不用重新加密路径
+        gone = [e.uuid for path, e in by_path.items() if path not in keep]
+        manifest.delete_many(gone)
+        manifest.delete_kept_many(gone)
         manifest.commit()
         return [result[se.rel] for se in scan if not se.is_dir]
 
     # ---------------------------------------------------------------- 上锁核心
 
-    def _encrypt_entry(self, e: FileEntry, plain: Path) -> tuple[int, bytes]:
+    def _io_batches(self, files: list[FileEntry]) -> Iterable[list[FileEntry]]:
+        """把文件分批交给 C++ 引擎并行处理。
+
+        一批内的文件同时加 / 解密；批与批之间提交 manifest、删掉旧副本。一批里新旧两份副本
+        同时占盘，所以每批的总字节数受剩余空间限制（至少放一个文件）。"""
+        try:
+            free = fsutil.free_bytes(self.root)
+        except OSError:
+            free = 0
+        limit = (free - C.SPACE_RESERVE_BYTES) // 2
+        limit = max(BATCH_MIN_BYTES, min(BATCH_MAX_BYTES, limit))
+        batch: list[FileEntry] = []
+        size = 0
+        for e in files:
+            if batch and (len(batch) >= BATCH or size + e.size > limit):
+                yield batch
+                batch, size = [], 0
+            batch.append(e)
+            size += e.size
+        if batch:
+            yield batch
+
+    def _encrypt_entries(
+        self,
+        entries: list[FileEntry],
+        on_progress: transform.BatchProgressFn | None,
+        control: OperationControl | None,
+    ) -> list[tuple[int, bytes]]:
+        """并行加密到 .vault/tmp，fsync 后逐个 rename 成正式密文，最后 fsync 一次 blobs 目录。"""
         from . import crash
 
         assert self._key is not None
-        blob = self._blob_path(e)
-        tmp = self.tmp_dir / (e.uuid.hex() + ".part")
+        chunk = self._chunk_size()
+        tmp_dir = os.fspath(self.tmp_dir)
+        blob_dir = os.fspath(self.blob_dir)
+        tmps = [long_path(os.path.join(tmp_dir, e.uuid.hex() + ".part")) for e in entries]
+        jobs = [
+            transform.EncryptJob(self._plain_path(e), tmp, self._file_key(e), e.uuid, chunk, size_hint=e.size)
+            for e, tmp in zip(entries, tmps)
+        ]
+        renamed = 0
         try:
-            size, sha = transform.encrypt_file(
-                plain, tmp, self._file_key(e), e.uuid, chunk_size=self._chunk_size()
-            )
-            crash.point("lock:before_blob_rename")
-            os.replace(long_path(tmp), long_path(blob))
+            results = transform.encrypt_many(jobs, progress=on_progress, control=control)
+            for e, tmp in zip(entries, tmps):
+                crash.point("lock:before_blob_rename")
+                os.replace(tmp, long_path(os.path.join(blob_dir, e.uuid.hex() + ".blob")))
+                renamed += 1
+                crash.point("lock:after_blob_rename")
             fsutil.fsync_dir(self.blob_dir)
-            crash.point("lock:after_blob_rename")
-            return size, sha
+            return results
         finally:
-            if tmp.exists():
+            for tmp in tmps[renamed:]:  # 已经改名的不用再删
                 try:
-                    os.unlink(long_path(tmp))
+                    os.unlink(tmp)
                 except OSError:
                     pass
 
@@ -650,17 +693,36 @@ class Vault:
         total_files = len(files)
         done_files = 0
         done_bytes = 0
-        for batch in chunked(files, BATCH):
+        kept = manifest.load_kept()
+        reuse = self._reusable_blobs(files, kept)
+        for batch in self._io_batches(files):
             ready: list[FileEntry] = []
+            to_encrypt: list[FileEntry] = []
+            updated: list[FileEntry] = []
             for e in batch:
                 if control is not None:
                     control.check()
+                k = reuse.get(e.uuid)
+                if k is not None:
+                    # 解锁后明文、密文都没动过：保留的密文就是这份明文加密的结果，直接用，不用重新加密
+                    e.size = k.size
+                    e.sha256 = k.sha256
+                    e.state = C.ST_PENDING_LOCK
+                    updated.append(e)
+                    ready.append(e)
+                    done_files += 1
+                    done_bytes += k.size
+                    continue
                 plain = self._plain_path(e)
                 blob = self._blob_path(e)
                 p_exists = os.path.isfile(long_path(plain))
                 b_exists = os.path.exists(long_path(blob))
 
                 if p_exists:
+                    if b_exists and e.uuid in kept:
+                        # 解锁时保留的密文，但明文改过（或密文被动过）：以明文为准重新加密，新密文原子替换旧的
+                        to_encrypt.append(e)
+                        continue
                     if b_exists:
                         # 上次中断留下的密文：能对上就直接用，对不上就重加密
                         try:
@@ -670,12 +732,12 @@ class Vault:
                         except VaultError:
                             b_size, b_sha = None, None
                         if b_sha is not None:
-                            p_sha = fsutil.sha256_file(plain)
+                            p_sha = transform.sha256_file(plain)
                             if p_sha == b_sha:
                                 e.size = b_size
                                 e.sha256 = b_sha
                                 e.state = C.ST_PENDING_LOCK
-                                manifest.update(e)
+                                updated.append(e)
                                 ready.append(e)
                                 done_files += 1
                                 done_bytes += b_size
@@ -684,14 +746,7 @@ class Vault:
                             os.unlink(long_path(blob))
                         except OSError:
                             pass
-                    size, sha = self._encrypt_entry(e, plain)
-                    e.size = size
-                    e.sha256 = sha
-                    e.state = C.ST_PENDING_LOCK
-                    manifest.update(e)
-                    ready.append(e)
-                    done_files += 1
-                    done_bytes += size
+                    to_encrypt.append(e)
                 elif b_exists:
                     # 明文已经删掉：密文必须能校验通过，否则就是数据损坏
                     try:
@@ -703,36 +758,47 @@ class Vault:
                     e.size = size
                     e.sha256 = sha
                     e.state = C.ST_SEALED
-                    manifest.update(e)
+                    updated.append(e)
                     journal.append("sealed_existing", uuid=e.uuid.hex())
                     done_files += 1
                     done_bytes += size
                 else:
                     raise IntegrityError(f"文件「{e.path}」的明文和密文都找不到，无法上锁")
 
+            if to_encrypt:
+                base_files, base_bytes = done_files, done_bytes
+
+                def on_progress(b: int, f: int, base_files=base_files, base_bytes=base_bytes) -> None:
+                    self._emit(
+                        progress,
+                        "正在加密文件",
+                        done_files=base_files + f,
+                        total_files=total_files,
+                        done_bytes=base_bytes + b,
+                        total_bytes=total_bytes,
+                    )
+
+                results = self._encrypt_entries(to_encrypt, on_progress, control)
+                for e, (size, sha) in zip(to_encrypt, results):
+                    e.size = size
+                    e.sha256 = sha
+                    e.state = C.ST_PENDING_LOCK
+                    updated.append(e)
+                    ready.append(e)
+                    done_files += 1
+                    done_bytes += size
+
+            manifest.update_meta_many(updated)
             crash.point("lock:before_manifest_commit")
             if control is not None:
                 control.check()  # 提交前最后一道安全检查：取消则留下可恢复的中间态
             manifest.commit()
             crash.point("lock:after_manifest_commit")
 
-            parents: set[str] = set()
+            parents = self._unlink_plaintexts(ready)
             for e in ready:
-                crash.point("lock:before_unlink_plaintext")
-                plain = self._plain_path(e)
-                try:
-                    os.unlink(long_path(plain))
-                    parents.add(str(plain.parent))
-                except FileNotFoundError:
-                    pass
-                except PermissionError as exc:
-                    raise VaultError(
-                        f"文件「{e.path}」删不掉，可能正被其他程序占用（比如 Excel、看图软件）。\n"
-                        "请关闭那个程序后再点上锁；保险箱现在是可恢复的中间状态，不会丢数据。"
-                    ) from exc
-                crash.point("lock:after_unlink_plaintext")
                 e.state = C.ST_SEALED
-                manifest.update(e)
+            manifest.set_state_many([e.uuid for e in ready], C.ST_SEALED)
             manifest.commit()
             for p in parents:
                 fsutil.fsync_dir(p)
@@ -745,7 +811,77 @@ class Vault:
                 done_bytes=done_bytes,
                 total_bytes=total_bytes,
             )
+        if kept:
+            manifest.clear_kept()  # 全部是密文了，指纹记录不再需要
+            manifest.commit()
+        self._remove_orphan_blobs()
         journal.append("lock_files_done", count=total_files)
+
+    def _unlink_plaintexts(self, ready: list[FileEntry]) -> set[str]:
+        """删掉已经有密文的明文（密文已 fsync 且 manifest 已提交）。文件多时多线程删。返回涉及的目录。"""
+        from . import crash
+
+        root_s = os.fspath(self.root)
+
+        def one(e: FileEntry):
+            crash.point("lock:before_unlink_plaintext")
+            plain = os.path.join(root_s, fsutil.from_rel(e.path))
+            try:
+                os.unlink(long_path(plain))
+            except FileNotFoundError:
+                return None
+            except PermissionError as exc:
+                return exc
+            crash.point("lock:after_unlink_plaintext")
+            return os.path.dirname(plain)
+
+        if len(ready) < 64:
+            results = [one(e) for e in ready]
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                results = list(ex.map(one, ready, chunksize=64))
+        for e, r in zip(ready, results):
+            if isinstance(r, PermissionError):
+                raise VaultError(
+                    f"文件「{e.path}」删不掉，可能正被其他程序占用（比如 Excel、看图软件）。\n"
+                    "请关闭那个程序后再点上锁；保险箱现在是可恢复的中间状态，不会丢数据。"
+                ) from r
+        return {r for r in results if isinstance(r, str)}
+
+    def _reusable_blobs(self, files: list[FileEntry], kept: dict[bytes, Kept]) -> dict[bytes, Kept]:
+        """解锁后明文和保留的密文都没被动过的文件（两边指纹和解锁时记的完全一样）。"""
+        cand = [e for e in files if e.uuid in kept]
+        if not cand:
+            return {}
+        fps = transform.stat_many([self._plain_path(e) for e in cand] + [self._blob_path(e) for e in cand])
+        p_fps, b_fps = fps[: len(cand)], fps[len(cand) :]
+        out: dict[bytes, Kept] = {}
+        for e, pf, bf in zip(cand, p_fps, b_fps):
+            k = kept[e.uuid]
+            if pf is not None and bf is not None and pf == k.plain_fp and bf == k.blob_fp:
+                out[e.uuid] = k
+        return out
+
+    def _remove_orphan_blobs(self) -> None:
+        """删掉 manifest 里已经没有对应条目的密文（解锁期间被删掉 / 改名 / 换类型的文件留下的）。
+        这些条目的删除已经提交，密文不会再被用到。"""
+        live = {u.hex() for u in self._open_manifest().file_uuids()}
+        try:
+            names = os.listdir(long_path(self.blob_dir))
+        except OSError:
+            return
+        removed = 0
+        for n in names:
+            if n.endswith(".blob") and n[: -len(".blob")] not in live:
+                try:
+                    os.unlink(long_path(os.path.join(os.fspath(self.blob_dir), n)))
+                    removed += 1
+                except OSError:
+                    pass
+        if removed:
+            fsutil.fsync_dir(self.blob_dir)
 
     def _remove_empty_dirs(self, dirs: list[FileEntry]) -> None:
         for e in sorted(dirs, key=lambda x: x.path.count("/"), reverse=True):
@@ -855,37 +991,49 @@ class Vault:
             more = "" if len(missing) <= 5 else f" 等 {len(missing)} 个"
             raise IntegrityError(f"缺少密文文件：{head}{more}。保险箱可能被外部改动过，请先从备份恢复。")
 
-    def _decrypt_entry(self, e: FileEntry, plain: Path) -> bytes:
+    def _decrypt_entries(
+        self,
+        entries: list[FileEntry],
+        on_progress: transform.BatchProgressFn | None,
+        control: OperationControl | None,
+    ) -> list[tuple[int, bytes]]:
+        """并行解密到各自目录下的 *.fdv-part（引擎里已校验 tag、大小和 sha256 并 fsync），
+        再逐个 rename 成正式文件、恢复时间和权限，最后 fsync 涉及的目录。"""
         from . import crash
 
-        blob = self._blob_path(e)
-        plain.parent.mkdir(parents=True, exist_ok=True)
-        tmp = plain.parent / (plain.name + ".fdv-part")
-        expected_size = e.size if e.size else None
-        try:
-            sha = transform.decrypt_file(
-                blob,
-                tmp,
-                self._file_key(e),
-                e.uuid,
-                expected_size,
-                e.sha256,
-                progress=None,
+        plains = [self._plain_path(e) for e in entries]
+        parts = [p.parent / (p.name + ".fdv-part") for p in plains]
+        for p in {str(x.parent) for x in plains}:
+            Path(p).mkdir(parents=True, exist_ok=True)
+        jobs = [
+            transform.DecryptJob(
+                self._blob_path(e), part, self._file_key(e), e.uuid, e.size if e.size else None, e.sha256
             )
-            crash.point("unlock:after_blob_read_verify")
-            if e.sha256 and sha != e.sha256:
-                raise IntegrityError(f"文件「{e.path}」解密后校验不一致")
-            crash.point("unlock:before_rename")
-            os.replace(long_path(tmp), long_path(plain))
-            fsutil.fsync_dir(plain.parent)
-            fsutil.set_mtime_ns(plain, e.mtime_ns)
-            fsutil.set_mode(plain, e.mode)
-            crash.point("unlock:after_rename")
-            return sha
+            for e, part in zip(entries, parts)
+        ]
+        renamed = 0
+        try:
+            results = transform.decrypt_many(jobs, progress=on_progress, control=control)
+            parents: set[str] = set()
+            for e, plain, part, (_size, sha) in zip(entries, plains, parts, results):
+                crash.point("unlock:after_blob_read_verify")
+                if e.sha256 and sha != e.sha256:
+                    raise IntegrityError(f"文件「{e.path}」解密后校验不一致")
+                crash.point("unlock:before_rename")
+                plain_s = long_path(plain)
+                os.replace(long_path(part), plain_s)
+                renamed += 1
+                parents.add(os.path.dirname(os.fspath(plain)))
+                fsutil.set_mtime_ns(plain_s, e.mtime_ns)
+                fsutil.set_mode(plain_s, e.mode)
+                crash.point("unlock:after_rename")
+            for p in parents:
+                fsutil.fsync_dir(p)
+            return results
         finally:
-            if tmp.exists():
+            for part in parts[renamed:]:  # 已经改名的不用再删
                 try:
-                    os.unlink(long_path(tmp))
+                    os.unlink(long_path(part))
                 except OSError:
                     pass
 
@@ -902,50 +1050,80 @@ class Vault:
         total_files = len(files)
         done_files = 0
         done_bytes = 0
-        for batch in chunked(files, BATCH):
+        keep = self._keep_ciphertext(files)
+        for batch in self._io_batches(files):
             ready: list[FileEntry] = []
             delete_blobs: list[FileEntry] = []
+            matched: set[bytes] = set()  # 已有明文且和记录的哈希一致（密文就是它的加密结果）
+            plan: list[tuple[FileEntry, bool, bool]] = []  # (条目, 明文在, 密文在)
             for e in batch:
                 if control is not None:
                     control.check()
-                plain = self._plain_path(e)
-                blob = self._blob_path(e)
-                p_exists = os.path.isfile(long_path(plain))
-                b_exists = os.path.exists(long_path(blob))
+                p_exists = os.path.isfile(long_path(self._plain_path(e)))
+                b_exists = os.path.exists(long_path(self._blob_path(e)))
+                if not p_exists and not b_exists:
+                    raise IntegrityError(f"文件「{e.path}」的密文找不到，无法解锁")
+                plan.append((e, p_exists, b_exists))
 
+            # 上次中断留下的明文：先并行算哈希，对不上的重新解密
+            have_plain = [e for e, p, _b in plan if p]
+            hashes = dict(
+                zip(
+                    (e.uuid for e in have_plain),
+                    transform.sha256_many([self._plain_path(e) for e in have_plain], control=control),
+                )
+            )
+            to_decrypt: list[FileEntry] = []
+            for e, p_exists, b_exists in plan:
                 if p_exists:
-                    p_sha = fsutil.sha256_file(plain)
-                    p_size = os.path.getsize(long_path(plain))
+                    p_sha = hashes[e.uuid]
                     if e.sha256 and p_sha != e.sha256:
                         if not b_exists:
                             raise IntegrityError(f"文件「{e.path}」内容与记录不一致，且没有密文可恢复")
-                        self._decrypt_entry(e, plain)
-                        p_sha, p_size = e.sha256, e.size
+                        to_decrypt.append(e)
+                    elif e.sha256:
+                        matched.add(e.uuid)
                     else:
-                        if not e.sha256:
-                            e.sha256 = p_sha
-                            e.size = p_size
-                    e.state = C.ST_PENDING_UNLOCK
-                    manifest.update(e)
-                    ready.append(e)
-                    if b_exists:
-                        delete_blobs.append(e)
-                    done_files += 1
-                    done_bytes += p_size
-                elif b_exists:
-                    self._decrypt_entry(e, plain)
-                    if not e.sha256:
-                        e.sha256 = fsutil.sha256_file(plain)
-                        e.size = os.path.getsize(long_path(plain))
-                    e.state = C.ST_PENDING_UNLOCK
-                    manifest.update(e)
-                    ready.append(e)
-                    delete_blobs.append(e)
-                    journal.append("opened", uuid=e.uuid.hex())
-                    done_files += 1
-                    done_bytes += e.size
+                        e.sha256 = p_sha
+                        e.size = os.path.getsize(long_path(self._plain_path(e)))
                 else:
-                    raise IntegrityError(f"文件「{e.path}」的密文找不到，无法解锁")
+                    to_decrypt.append(e)
+
+            decrypted: dict[bytes, tuple[int, bytes]] = {}
+            if to_decrypt:
+                base_files, base_bytes = done_files, done_bytes
+
+                def on_progress(b: int, f: int, base_files=base_files, base_bytes=base_bytes) -> None:
+                    self._emit(
+                        progress,
+                        "正在解密文件",
+                        done_files=base_files + f,
+                        total_files=total_files,
+                        done_bytes=base_bytes + b,
+                        total_bytes=total_bytes,
+                    )
+
+                results = self._decrypt_entries(to_decrypt, on_progress, control)
+                decrypted = {e.uuid: r for e, r in zip(to_decrypt, results)}
+
+            for e, p_exists, b_exists in plan:
+                if e.uuid in decrypted and not e.sha256:
+                    e.size, e.sha256 = decrypted[e.uuid]
+                e.state = C.ST_PENDING_UNLOCK
+                ready.append(e)
+                if b_exists:
+                    delete_blobs.append(e)
+                if not p_exists:
+                    journal.append("opened", uuid=e.uuid.hex())
+                done_files += 1
+                done_bytes += e.size
+            manifest.update_meta_many(ready)
+            if keep:
+                # 保留密文：记下明文和密文此刻的指纹，上锁时都没变就不用重新加密
+                known = [e for e in delete_blobs if e.uuid in decrypted or e.uuid in matched]
+                self._record_kept(known)
+            else:
+                manifest.delete_kept_many([e.uuid for e in delete_blobs])
 
             crash.point("unlock:before_manifest_commit")
             if control is not None:
@@ -953,18 +1131,20 @@ class Vault:
             manifest.commit()
             crash.point("unlock:after_manifest_commit")
 
-            for e in delete_blobs:
-                crash.point("unlock:before_unlink_blob")
-                try:
-                    os.unlink(long_path(self._blob_path(e)))
-                except FileNotFoundError:
-                    pass
-                crash.point("unlock:after_unlink_blob")
-            if delete_blobs:
-                fsutil.fsync_dir(self.blob_dir)
+            if not keep:
+                # 磁盘不够同时放明文和密文：和以前一样，明文落盘后删掉密文
+                for e in delete_blobs:
+                    crash.point("unlock:before_unlink_blob")
+                    try:
+                        os.unlink(long_path(self._blob_path(e)))
+                    except FileNotFoundError:
+                        pass
+                    crash.point("unlock:after_unlink_blob")
+                if delete_blobs:
+                    fsutil.fsync_dir(self.blob_dir)
             for e in ready:
                 e.state = C.ST_OPEN
-                manifest.update(e)
+            manifest.set_state_many([e.uuid for e in ready], C.ST_OPEN)
             manifest.commit()
 
             self._emit(
@@ -976,6 +1156,32 @@ class Vault:
                 total_bytes=total_bytes,
             )
         journal.append("unlock_files_done", count=total_files)
+
+    def _keep_ciphertext(self, files: list[FileEntry]) -> bool:
+        """解锁时保留密文（下次上锁没改过的文件就不用重新加密）。
+
+        要多占一份空间：剩余空间放得下全部明文（再留 1 GB 余量）才保留，否则按老办法边解边删。
+        FDVAULT_KEEP_CIPHERTEXT=0 可关闭。"""
+        if os.environ.get("FDVAULT_KEEP_CIPHERTEXT", "1") == "0":
+            return False
+        need = sum(e.size for e in files) + C.SPACE_RESERVE_BYTES + KEEP_MARGIN_BYTES
+        try:
+            return fsutil.free_bytes(self.root) >= need
+        except OSError:
+            return False
+
+    def _record_kept(self, entries: list[FileEntry]) -> None:
+        """在明文已经改名到位、时间和权限也恢复之后取指纹（改时间 / 权限本身会变状态改变时间）。"""
+        if not entries:
+            return
+        fps = transform.stat_many([self._plain_path(e) for e in entries] + [self._blob_path(e) for e in entries])
+        p_fps, b_fps = fps[: len(entries)], fps[len(entries) :]
+        rows = [
+            (e.uuid, Kept(e.sha256, e.size, pf, bf))
+            for e, pf, bf in zip(entries, p_fps, b_fps)
+            if pf is not None and bf is not None and e.sha256
+        ]
+        self._open_manifest().put_kept_many(rows)
 
     def _restore_dirs(self, dirs: list[FileEntry]) -> None:
         for e in sorted(dirs, key=lambda x: x.path.count("/"), reverse=True):
@@ -1112,25 +1318,35 @@ class Vault:
             entries = manifest.load_all()
             files = [e for e in entries if not e.is_dir]
             total_bytes = sum(e.size for e in files)
-            problems: list[dict] = []
-            done_bytes = 0
-            for idx, e in enumerate(files, 1):
+            problems: list[tuple[int, dict]] = []
+            present: list[tuple[int, FileEntry]] = []
+            for idx, e in enumerate(files):
                 if control is not None:
                     control.check()
-                blob = self._blob_path(e)
-                if not os.path.exists(long_path(blob)):
-                    problems.append({"path": e.path, "reason": "密文缺失"})
+                if not os.path.exists(long_path(self._blob_path(e))):
+                    problems.append((idx, {"path": e.path, "reason": "密文缺失"}))
                     continue
-                try:
-                    size, sha = transform.verify_blob(blob, self._file_key(e), e.uuid, e.size or None)
-                except VaultError as exc:
-                    problems.append({"path": e.path, "reason": str(exc)})
+                present.append((idx, e))
+
+            def on_progress(b: int, f: int) -> None:
+                self._emit(progress, "正在校验", done_files=f, total_files=len(files), done_bytes=b, total_bytes=total_bytes)
+
+            results = transform.verify_many(
+                [
+                    transform.DecryptJob(self._blob_path(e), None, self._file_key(e), e.uuid, e.size or None)
+                    for _idx, e in present
+                ],
+                progress=on_progress,
+                control=control,
+            )
+            for (idx, e), r in zip(present, results):
+                if isinstance(r, VaultError):
+                    problems.append((idx, {"path": e.path, "reason": str(r)}))
                     continue
+                _size, sha = r
                 if e.sha256 and sha != e.sha256:
-                    problems.append({"path": e.path, "reason": "内容哈希不一致"})
-                done_bytes += size
-                if idx % 16 == 0:
-                    self._emit(progress, "正在校验", done_files=idx, total_files=len(files), done_bytes=done_bytes, total_bytes=total_bytes)
+                    problems.append((idx, {"path": e.path, "reason": "内容哈希不一致"}))
+            problems = [p for _idx, p in sorted(problems, key=lambda x: x[0])]
             ok = not problems
             self._record("VERIFY", result="ok" if ok else "fail", detail=f"{len(files)} 个文件，{len(problems)} 个问题")
             return {"files": len(files), "bytes": total_bytes, "problems": problems, "ok": ok}

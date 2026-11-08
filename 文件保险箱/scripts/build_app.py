@@ -107,7 +107,22 @@ def build_iconset() -> None:
     )
 
 
-def pyinstaller(icons: dict[str, Path], clean: bool) -> Path:
+def build_native() -> Path:
+    """编译 C++ 加解密引擎（native/）并复制到 core/_native/，返回库文件路径。"""
+    from scripts.build_native import main as build_native_main
+
+    log("编译 C++ 加解密引擎")
+    if build_native_main([]) != 0:
+        raise SystemExit("C++ 加解密引擎编译失败")
+    from core import native
+
+    lib = PROJECT / "core" / "_native" / native.lib_filename()
+    if not lib.exists():
+        raise SystemExit(f"没有生成 {lib}")
+    return lib
+
+
+def pyinstaller(icons: dict[str, Path], clean: bool, native_lib: Path) -> Path:
     env = dict(os.environ)
     env["PYINSTALLER_CONFIG_DIR"] = str(BUILD / "pyinstaller-cache")
     if sys.platform == "darwin":
@@ -132,6 +147,9 @@ def pyinstaller(icons: dict[str, Path], clean: bool) -> Path:
         str(BUILD),
         "--distpath",
         str(DIST),
+        # C++ 加解密引擎：放在包内 core/_native/，core/native.py 从 sys._MEIPASS 找
+        "--add-binary",
+        f"{native_lib}{os.pathsep}core/_native",
         "run_gui.py",
     ]
     if clean:
@@ -536,7 +554,7 @@ def main() -> int:
     if args.skip_build:
         bundle = DIST / (f"{APP_NAME}.app" if sys.platform == "darwin" else APP_NAME)
     else:
-        bundle = pyinstaller(icons, clean=not args.no_clean)
+        bundle = pyinstaller(icons, clean=not args.no_clean, native_lib=build_native())
     log(f"产物：{bundle}（{sum(p.stat().st_size for p in bundle.rglob('*') if p.is_file()) / 1024 / 1024:.0f} MB）")
     if not args.skip_smoke:
         smoke_test(bundle)

@@ -45,6 +45,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt pyinstaller
 
+      - name: 编译 C++ 加解密引擎（自检 + 性能）
+        run: python scripts/build_native.py
+
       - name: 自动化测试（核心 + CLI）
         run: python -m pytest tests -q
         env:

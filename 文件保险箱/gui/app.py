@@ -176,6 +176,10 @@ def main(argv: list[str] | None = None) -> int:
         print("文件保险箱已经在运行，已唤起现有窗口。")
         return 0
 
+    # Windows：程序开着时给已上锁的保险箱持有占用句柄，资源管理器移动 / 改名 / 删除都会被拒绝
+    from core import protect
+
+    protect.enable_holds()
     window = MainWindow(store)
     single.start_server(window.show_and_raise)
     window.show()

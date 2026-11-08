@@ -66,8 +66,8 @@ def test_unlock_restores_bytes_and_metadata(tmp_path, audit_dir):
     assert stats["files"] == 6
     assert Vault(root).status()["state"] == C.UNLOCKED
     assert snapshot(root) == before
-    # 解密后不再有密文
-    assert not list((root / ".vault" / "blobs").iterdir())
+    # 空间够时解锁保留密文（下次上锁没改过的文件不用重新加密）
+    assert len(list((root / ".vault" / "blobs").iterdir())) == 6
 
 
 def test_repeated_cycles(tmp_path, audit_dir):

@@ -17,6 +17,13 @@ Windows
        父目录下没有别的上锁保险箱时，撤保护会把它一起撤掉；父目录本来就有 Everyone 的拒绝规则、
        或者没权限改（如 D 盘根目录），就不碰父目录，只做第 1 步（这时文件夹整体还能被挪走）。
 
+    3. **占用句柄**（只在图形界面程序运行期间）：对每个已上锁的保险箱根目录持有一个
+       不允许「共享删除」的目录句柄。Windows 上移动 / 改名 / 删除文件夹都要以 DELETE 权限打开它，
+       有这个句柄在就会被拒绝（「操作无法完成，因为文件夹已在另一程序中打开」）——
+       不依赖 NTFS 权限，所以 U 盘（exFAT/FAT32）、磁盘根目录（如 D:\保险箱）、
+       管理员点了「继续」也一样拦得住。程序退出后只剩第 1、2 步的权限规则。
+       代价：程序开着时，放着已上锁保险箱的 U 盘不能「安全弹出」，要先退出程序。
+
 本程序自己做解锁 / 改密码 / 校验等操作时，先撤掉保护（文件的主人有权改这些属性），
 操作结束如果还是「已上锁」再加回去，见 core/vault.py 的 @locked。
 
@@ -197,6 +204,7 @@ def release(root: str | os.PathLike) -> None:
 
     不看 enabled()：关掉开关之前加上的保护也要能撤掉。"""
     root = Path(root)
+    unhold(root)
     if IS_MAC:
         _release_mac(root)
     elif IS_WINDOWS:
@@ -252,6 +260,11 @@ def _has_mac_acl(p: Path) -> bool:
 def release_tree(path: str | os.PathLike) -> None:
     """把 path 下面所有保险箱的保护都撤掉（测试 / 自检清理临时目录用）。"""
     path = Path(path)
+    prefix = _hold_key(path)
+    with _holds_lock:
+        keys = [k for k in _holds if k == prefix or k.startswith(prefix.rstrip("\\/") + os.sep)]
+    for k in keys:
+        _unhold_key(k)
     if not path.exists():
         return
     if IS_WINDOWS:
@@ -298,3 +311,111 @@ def probe(root: str | os.PathLike, elsewhere: str | os.PathLike) -> list[str]:
             continue
         leaked.append(name)
     return leaked
+
+
+# ---------------------------------------------------------------- Windows：占用句柄（见模块说明第 3 条）
+
+import threading  # noqa: E402
+
+_holds: dict[str, int] = {}
+_holds_lock = threading.Lock()
+_holds_enabled = False
+
+
+def enable_holds(on: bool = True) -> None:
+    """图形界面启动时打开。命令行 / 测试默认不持有句柄（进程很快退出，也免得删不掉临时目录）。"""
+    global _holds_enabled
+    _holds_enabled = on
+    if not on:
+        unhold_all()
+
+
+def _hold_key(root: str | os.PathLike) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(root)))
+
+
+def _win_open_dir_no_share_delete(path: str) -> int | None:
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = k32.CreateFileW
+    create.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    create.restype = wintypes.HANDLE
+    FILE_LIST_DIRECTORY = 0x0001  # 要有「数据」类访问，共享检查才算数（只要属性访问的句柄不参与）
+    SYNCHRONIZE = 0x00100000
+    FILE_SHARE_READ, FILE_SHARE_WRITE = 0x1, 0x2  # 故意不给 FILE_SHARE_DELETE
+    OPEN_EXISTING = 3
+    FILE_FLAG_BACKUP_SEMANTICS = 0x02000000  # 打开目录必须带
+    from .fsutil import long_path
+
+    h = create(
+        long_path(path), FILE_LIST_DIRECTORY | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None,
+    )
+    invalid = ctypes.c_void_p(-1).value
+    if not h or h == invalid:
+        return None
+    return int(h)
+
+
+def _win_close(h: int) -> None:
+    import ctypes
+
+    ctypes.WinDLL("kernel32").CloseHandle(ctypes.c_void_p(h))
+
+
+def hold(root: str | os.PathLike) -> bool:
+    """对已上锁的保险箱根目录持有占用句柄。只在 Windows + 图形界面里生效；重复调用没关系。"""
+    if not (IS_WINDOWS and _holds_enabled and enabled()):
+        return False
+    key = _hold_key(root)
+    with _holds_lock:
+        if key in _holds:
+            return True
+        h = _win_open_dir_no_share_delete(key)
+        if h is None:
+            return False
+        _holds[key] = h
+        return True
+
+
+def _unhold_key(key: str) -> bool:
+    with _holds_lock:
+        h = _holds.pop(key, None)
+    if h is None:
+        return False
+    _win_close(h)
+    return True
+
+
+def unhold(root: str | os.PathLike) -> bool:
+    """放掉占用句柄（本程序要动这个保险箱之前 / 从列表移除时）。返回之前是否持有。"""
+    if not _holds:
+        return False
+    return _unhold_key(_hold_key(root))
+
+
+def unhold_all() -> None:
+    with _holds_lock:
+        keys = list(_holds)
+    for k in keys:
+        _unhold_key(k)
+
+
+def is_held(root: str | os.PathLike) -> bool:
+    return _hold_key(root) in _holds
+
+
+def sync_holds(locked_roots: "list[str | os.PathLike]") -> None:
+    """让持有的句柄正好对应这些已上锁的保险箱（界面刷新列表时调用）。"""
+    want = {_hold_key(r): r for r in locked_roots}
+    with _holds_lock:
+        stale = [k for k in _holds if k not in want]
+    for k in stale:
+        _unhold_key(k)
+    for r in want.values():
+        hold(r)

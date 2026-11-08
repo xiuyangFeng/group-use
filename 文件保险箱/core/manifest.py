@@ -45,7 +45,24 @@ CREATE TABLE IF NOT EXISTS meta(
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+-- 解锁期间保留的密文：解锁时记下明文和密文的指纹，上锁时两个指纹都没变就直接用这份密文，
+-- 不用重新加密（见 vault._finalize_lock）。上锁完成后清空。旧版软件会忽略这张表。
+CREATE TABLE IF NOT EXISTS kept(
+    uuid     BLOB PRIMARY KEY,
+    sha256   BLOB NOT NULL,
+    size     INTEGER NOT NULL,
+    plain_fp BLOB NOT NULL,
+    blob_fp  BLOB NOT NULL
+);
 """
+
+
+@dataclass
+class Kept:
+    sha256: bytes
+    size: int
+    plain_fp: bytes
+    blob_fp: bytes
 
 
 class Manifest:
@@ -141,6 +158,34 @@ class Manifest:
             (ct, nonce, int(e.is_dir), e.size, e.mtime_ns, e.mode, e.sha256, e.state, e.uuid),
         )
 
+    def update_meta_many(self, entries: list[FileEntry]) -> None:
+        """只改大小 / 时间 / 权限 / 哈希 / 状态（路径没变时用，不用重新加密路径，快很多）。"""
+        self.conn.executemany(
+            "UPDATE files SET is_dir=?, size=?, mtime_ns=?, mode=?, sha256=?, state=? WHERE uuid=?",
+            [(int(e.is_dir), e.size, e.mtime_ns, e.mode, e.sha256, e.state, e.uuid) for e in entries],
+        )
+
+    def set_state_many(self, uuids: list[bytes], state: str) -> None:
+        self.conn.executemany("UPDATE files SET state=? WHERE uuid=?", [(state, u) for u in uuids])
+
+    # ---------------------------------------------------------------- 保留的密文
+
+    def put_kept_many(self, rows: list[tuple[bytes, Kept]]) -> None:
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO kept(uuid,sha256,size,plain_fp,blob_fp) VALUES(?,?,?,?,?)",
+            [(u, k.sha256, k.size, k.plain_fp, k.blob_fp) for u, k in rows],
+        )
+
+    def load_kept(self) -> dict[bytes, Kept]:
+        rows = self.conn.execute("SELECT uuid,sha256,size,plain_fp,blob_fp FROM kept").fetchall()
+        return {bytes(r[0]): Kept(bytes(r[1]), int(r[2]), bytes(r[3]), bytes(r[4])) for r in rows}
+
+    def delete_kept_many(self, uuids: list[bytes]) -> None:
+        self.conn.executemany("DELETE FROM kept WHERE uuid=?", [(u,) for u in uuids])
+
+    def clear_kept(self) -> None:
+        self.conn.execute("DELETE FROM kept")
+
     def set_state(self, entry_uuid: bytes, state: str) -> None:
         self.conn.execute("UPDATE files SET state=? WHERE uuid=?", (state, entry_uuid))
 
@@ -173,6 +218,10 @@ class Manifest:
                 )
             )
         return out
+
+    def file_uuids(self) -> set[bytes]:
+        """所有文件条目的 uuid（不解密路径，清理孤儿密文用）。"""
+        return {bytes(r[0]) for r in self.conn.execute("SELECT uuid FROM files WHERE is_dir=0")}
 
     def count(self) -> tuple[int, int, int]:
         """返回 (文件数, 目录数, 总字节)。"""

@@ -112,7 +112,7 @@ class PasswordPage(QWizardPage):
         lay.addWidget(head)
         lay.addSpacing(4)
 
-        self.pair = PasswordPair(self, first_placeholder="组内共用密码（6 位数字）")
+        self.pair = PasswordPair(self, first_placeholder="密码（6 位数字）")
         self.pair.changed.connect(self.completeChanged.emit)
         lay.addWidget(self.pair)
         # 兼容旧代码 / 自检脚本直接访问
@@ -126,7 +126,7 @@ class PasswordPage(QWizardPage):
 
     def initializePage(self) -> None:  # noqa: N802
         name = Path(self.wiz.target).name if self.wiz.target else ""
-        self.folder_label.setText(f"「{name}」· 组内共用" if name else "组内共用")
+        self.folder_label.setText(f"「{name}」" if name else " ")
         self.pw1.setFocus()
 
     def _ok(self) -> bool:
