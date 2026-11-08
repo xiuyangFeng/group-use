@@ -922,6 +922,7 @@ class AuditWindow(QWidget):
 
 _EVENT_NAMES = {
     "CREATE": "创建",
+    "CREATE_CANCELLED": "取消新建（已还原）",
     "UNLOCK": "解锁",
     "UNLOCK_FAILED": "解锁失败",
     "LOCK": "上锁",

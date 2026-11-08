@@ -84,6 +84,13 @@ def _state_text(state: str) -> str:
     }.get(state, state)
 
 
+def _is_flash(path: str) -> bool:
+    try:
+        return Vault(path).status().get("mode") == C.MODE_FLASH
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _name(path: str) -> str:
     return Path(path).name or path
 
@@ -188,6 +195,8 @@ class VaultCard(QWidget):
             return "上次没锁回，文件还是明文，请上锁"
         files = int(info.get("file_count") or 0)
         total = int(info.get("total_bytes") or 0)
+        if info.get("mode") == C.MODE_FLASH:
+            return f"{short_path(info['path'])} · 闪电锁（不加密）· {files:,} 项"
         return f"{short_path(info['path'])} · {files:,} 个文件 · {fsutil.human_bytes(total)}"
 
     def _tooltip(self) -> str:
@@ -357,7 +366,7 @@ class MainWindow(QMainWindow):
         bar.addWidget(icon_button(make_tool_icon("gear"), "设置", self.open_settings))
         bar.addSpacing(6)
         self.new_btn = button("＋ 新建", kind="primary", on_click=lambda: self.new_vault())
-        self.new_btn.setToolTip("选一个文件夹加密（也可以直接把文件夹拖进窗口）")
+        self.new_btn.setToolTip("选一个文件夹上锁（也可以直接把文件夹拖进窗口）")
         bar.addWidget(self.new_btn)
         root.addLayout(bar)
         root.addSpacing(4)
@@ -375,7 +384,7 @@ class MainWindow(QMainWindow):
         self.drop_banner.setProperty("banner", "info")
         dl = QHBoxLayout(self.drop_banner)
         dl.setContentsMargins(14, 10, 14, 10)
-        hint = label("松开鼠标：新文件夹会加密，已有保险箱直接加进列表", role="h2")
+        hint = label("松开鼠标：新文件夹会上锁，已有保险箱直接加进列表", role="h2")
         hint.setAlignment(Qt.AlignCenter)
         dl.addWidget(hint, 1)
         self.drop_banner.hide()
@@ -395,7 +404,7 @@ class MainWindow(QMainWindow):
         self.scroll.setWidget(self.list_container)
         root.addWidget(self.scroll, 1)
 
-        self.empty = DropZone("把要保护的文件夹拖到这里", "选择文件夹", subtitle="加密后只有输对密码才能打开")
+        self.empty = DropZone("把要保护的文件夹拖到这里", "选择文件夹", subtitle="上锁后只有输对密码才能打开")
         self.empty.clicked.connect(lambda: self.new_vault())
         root.addWidget(self.empty, 1)
 
@@ -535,7 +544,7 @@ class MainWindow(QMainWindow):
             text = f"{unlocked} 个已解锁 · 用完记得上锁"
             style = f"color:{GREEN};"
         else:
-            text, style = "拖文件夹到窗口即可加密", f"color:{MUTED};"
+            text, style = "拖文件夹到窗口即可上锁", f"color:{MUTED};"
         self.status_left.setStyleSheet(style)
         self.status_left.setText(text)
 
@@ -783,6 +792,11 @@ class MainWindow(QMainWindow):
         if wiz.created:
             self.store.add_vault(wiz.target)
             self._notify("已上锁", f"「{_name(wiz.target)}」已创建并上锁。")
+        elif wiz.cancelled_create:
+            self._notify("已取消", f"「{_name(wiz.target)}」没有上锁，文件夹和原来一样。")
+        elif wiz.target and Vault(wiz.target).is_vault():
+            # 首次上锁 / 撤销没完成：留在列表里，好在卡片上点「恢复」
+            self.store.add_vault(wiz.target)
         self._refresh()
 
     def _add_existing(self, path: str) -> None:
@@ -972,7 +986,8 @@ class MainWindow(QMainWindow):
         if dlg is not None and dlg.outcome == "ok" and isinstance(dlg.result_data, dict):
             result = dlg.result_data
             if result.get("ok"):
-                QMessageBox.information(self, "校验通过", f"{result.get('files', 0):,} 个文件全部完好。")
+                what = "项都在" if _is_flash(path) else "个文件全部完好"
+                QMessageBox.information(self, "校验通过", f"{result.get('files', 0):,} {what}。")
             else:
                 problems = result.get("problems") or []
                 lines = "\n".join(f"· {p.get('path')}：{p.get('reason')}" for p in problems[:10])
@@ -987,10 +1002,10 @@ class MainWindow(QMainWindow):
         box.setWindowTitle("解除保险箱")
         box.setText(f"解除「{_name(path)}」后，它就是一个普通文件夹了。")
         box.setInformativeText(
-            "· 里面的文件全部解密成明文，以后不再上锁，也不会自动上锁；\n"
+            "· 里面的文件全部还原成普通文件，以后不再上锁，也不会自动上锁；\n"
             "· 这个保险箱的密码和密保问题随之作废；\n"
             "· 从列表里移除。文件本身不会删除。\n\n"
-            "以后想再加密，重新「＋ 新建」即可。"
+            "以后想再上锁，重新「＋ 新建」即可。"
         )
         ok = box.addButton("解除保险箱", QMessageBox.DestructiveRole)
         cancel = box.addButton("取消", QMessageBox.RejectRole)

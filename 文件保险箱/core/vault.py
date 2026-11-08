@@ -23,13 +23,14 @@ from typing import Callable, Iterable
 from cryptography.exceptions import InvalidTag
 
 from . import constants as C
-from . import crypto, fsutil, inuse, passwords, protect, transform
+from . import crypto, flash, fsutil, inuse, passwords, protect, transform
 from . import questions as Q
 from .audit import AuditLog
 from .control import OperationControl
 from .errors import (
     AlreadyVaultError,
     AnswerError,
+    Cancelled,
     DiskSpaceError,
     InUseError,
     IntegrityError,
@@ -94,6 +95,7 @@ class Vault:
         self._manifest: Manifest | None = None
         self._journal: Journal | None = None
         self._flock: VaultLock | None = None
+        self._creating = False  # prepare_new 之后、首次上锁成功之前（只在本对象内有效）
 
     # ---------------------------------------------------------------- 互斥锁
 
@@ -246,11 +248,15 @@ class Vault:
             return False
         if self.blob_dir.exists() and any(self.blob_dir.iterdir()):
             return False
+        if flash.map_path(self).exists() or not flash.stash_is_empty(self):
+            return False
         self._acquire()
         try:
             if self.manifest_path.exists():
                 return False
             if self.blob_dir.exists() and any(self.blob_dir.iterdir()):
+                return False
+            if flash.map_path(self).exists() or not flash.stash_is_empty(self):
                 return False
         finally:
             self._release()
@@ -262,6 +268,73 @@ class Vault:
             return False
         self._header = None
         return True
+
+    def cancel_create(self, progress: ProgressFn | None = None) -> dict:
+        """取消新建：首次上锁做到一半不想加密了，把文件夹变回从没建过保险箱的样子。
+
+        已经加密（明文已删）的文件先按「取消上锁」同样的回滚解密回去，然后删掉 .vault
+        和说明文件。只能在同一个 Vault 对象上、首次上锁成功之前调用（用内存里的密钥，
+        不用再输密码）；已经上过锁的保险箱不走这里，要用「解除保险箱」。
+        回滚本身不能再取消；中途断电的话，下次打开照常「恢复」，数据不会丢。"""
+        if not self._creating or self._key is None:
+            raise VaultStateError("只有新建保险箱、首次上锁还没完成时才能取消新建")
+        self._header = None
+        if not self.is_vault():
+            self._creating = False
+            return {"files": 0}
+        if self.abort_create():  # 还一个文件都没动
+            self._creating = False
+            return {"files": 0}
+        h = self.header
+        if h.state == C.LOCKING:
+            self._emit(progress, "正在撤销，把已加密的文件还原")
+            self.recover(rollback=True, progress=progress)
+        elif h.state != C.UNLOCKED:
+            raise VaultStateError(f"当前状态不能取消新建：{h.state}")
+
+        self._acquire()
+        try:
+            self._header = None
+            h = self.header
+            if h.state != C.UNLOCKED:
+                raise VaultStateError(f"当前状态不能取消新建：{h.state}")
+            stats = {"files": h.file_count}
+            self._record("CREATE_CANCELLED", detail="新建时取消，已还原成普通文件夹")
+            self._remove_vault_metadata()
+        finally:
+            self._release()
+        self._finish_remove_vault_dir()
+        self._creating = False
+        self._emit(progress, "已取消新建", done_files=stats["files"], total_files=stats["files"])
+        return stats
+
+    def _remove_vault_metadata(self) -> None:
+        """删掉 header、说明文件和 .vault 里的东西（调用方持有互斥锁，且明文已全部在位）。
+        先删 header：从那一刻起这个文件夹就不再是保险箱，之后哪一步失败也只剩用不上的残留。"""
+        protect.release(self.root)
+        if not flash.stash_is_empty(self):
+            # 闪电锁的文件还在 .vault/stash 里：绝不能连 .vault 一起删
+            raise VaultStateError("闪电锁里还有没挪回去的文件，不能删除保险箱数据；请先「恢复」")
+        os.unlink(long_path(self.header_path))
+        if self.marker_path.exists():
+            os.unlink(long_path(self.marker_path))
+        lock_file = self.vault_dir / "instance.lock"
+        for child in list(self.vault_dir.iterdir()):
+            if child == lock_file:
+                continue  # 自己还拿着它（Windows 上删不掉打开着的文件），放锁后再删
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(long_path(child), ignore_errors=True)
+            else:
+                try:
+                    os.unlink(long_path(child))
+                except OSError:
+                    pass
+
+    def _finish_remove_vault_dir(self) -> None:
+        """放锁之后删掉剩下的 .vault（里面只剩 instance.lock）。"""
+        self.close()
+        self._flock = None
+        shutil.rmtree(long_path(self.vault_dir), ignore_errors=True)
 
     # ---------------------------------------------------------------- 密钥
 
@@ -373,6 +446,7 @@ class Vault:
             "root": str(self.root),
             "state": h.state,
             "state_since": h.state_since,
+            "mode": h.mode,
             "vault_id": h.vault_id,
             "created_at": h.created_at,
             "file_count": h.file_count,
@@ -393,14 +467,20 @@ class Vault:
         questions: list[tuple[str, str]],
         progress: ProgressFn | None = None,
         control: OperationControl | None = None,
+        *,
+        mode: str = C.MODE_ENCRYPT,
     ) -> dict:
         """一步创建（CLI / 测试用）：生成密钥、设密保并首次上锁。"""
-        prepared = self.prepare_new(password, questions)
+        prepared = self.prepare_new(password, questions, mode=mode)
         stats = self.initial_lock(progress=progress, control=control)
         return {"questions": prepared["questions"], "stats": stats}
 
-    def prepare_new(self, password: str, questions: list[tuple[str, str]]) -> dict:
-        """第一步：校验 + 生成 header（含 3 个密保问题，几秒）。之后调用 initial_lock。"""
+    def prepare_new(self, password: str, questions: list[tuple[str, str]], *, mode: str = C.MODE_ENCRYPT) -> dict:
+        """第一步：校验 + 生成 header（含 3 个密保问题，几秒）。之后调用 initial_lock。
+
+        mode=C.MODE_FLASH：闪电锁（不加密，见 core/flash.py）。"""
+        if mode not in (C.MODE_ENCRYPT, C.MODE_FLASH):
+            raise VaultError(f"不认识的保险箱类型：{mode!r}")
         self._header = None
         self._require_root()
         if self.is_vault():
@@ -413,9 +493,13 @@ class Vault:
         pairs = [(str(q), str(a)) for q, a in questions]
         Q.validate_questions(pairs)
 
-        scan, total_bytes, skipped = fsutil.scan_tree(self.root, {C.VAULT_DIRNAME, C.MARKER_NAME})
-        max_file = max((e.size for e in scan if not e.is_dir), default=0)
-        self._ensure_space(2 * max_file + C.SPACE_RESERVE_BYTES)
+        if mode == C.MODE_FLASH:
+            # 闪电锁不搬数据、不占额外空间，也不用把整棵树扫一遍
+            scan, total_bytes, skipped = [], 0, []
+        else:
+            scan, total_bytes, skipped = fsutil.scan_tree(self.root, {C.VAULT_DIRNAME, C.MARKER_NAME})
+            max_file = max((e.size for e in scan if not e.is_dir), default=0)
+            self._ensure_space(2 * max_file + C.SPACE_RESERVE_BYTES)
 
         salt = os.urandom(crypto.SALT_LEN)
         kdf = crypto.choose_kdf_params()
@@ -438,6 +522,7 @@ class Vault:
             state=C.LOCKING,
             state_since=ts,
             questions=wrapped_q,
+            mode=mode,
         )
 
         self._acquire()
@@ -447,15 +532,22 @@ class Vault:
             fsutil.ensure_dir(self.vault_dir, 0o700)
             fsutil.ensure_dir(self.blob_dir, 0o700)
             fsutil.ensure_dir(self.tmp_dir, 0o700)
+            if h.is_flash:
+                fsutil.ensure_dir(flash.stash_dir(self), 0o700)
             save_header(self.header_path, h)
             self._header = h
             self._key = key
+            self._creating = True
             if not self.marker_path.exists():
-                fsutil.atomic_write_bytes(self.marker_path, C.MARKER_TEXT.encode("utf-8"), mode=0o644)
+                text = C.MARKER_TEXT_FLASH if h.is_flash else C.MARKER_TEXT
+                fsutil.atomic_write_bytes(self.marker_path, text.encode("utf-8"), mode=0o644)
             from . import crash
 
             crash.point("create:after_header")
 
+            if h.is_flash:
+                items = flash._top_items(self)
+                return {"questions": h.question_texts, "files": len(items), "dirs": 0, "bytes": 0, "skipped": [], "mode": mode}
             return {
                 "questions": h.question_texts,
                 "files": len([e for e in scan if not e.is_dir]),
@@ -475,8 +567,14 @@ class Vault:
             raise VaultStateError(f"当前状态不能完成首次上锁：{h.state}")
         self._open_session()
         try:
-            self._record("CREATE", detail="创建保险箱并首次上锁")
-            return self._lock_impl(progress, control=control)
+            if h.is_flash:
+                self._record("CREATE", detail="创建闪电锁（不加密）并首次上锁")
+                stats = self._flash_lock(progress, control, back_to=C.LOCKING)
+            else:
+                self._record("CREATE", detail="创建保险箱并首次上锁")
+                stats = self._lock_impl(progress, control=control)
+            self._creating = False
+            return stats
         finally:
             self._close_session()
 
@@ -503,6 +601,12 @@ class Vault:
 
         self._precheck_in_use()
         self._open_key(password=password, recovery_key=recovery_key, answers=answers)
+        if h.is_flash:
+            h.set_state(C.LOCKING)
+            self._save_header()
+            stats = self._flash_lock(progress, control, back_to=C.UNLOCKED)
+            self._record("LOCK", detail=f"闪电锁：{stats['files']} 项")
+            return stats
         prescan = self._precheck_busy()
         self._open_session()
         try:
@@ -514,6 +618,25 @@ class Vault:
             return stats
         finally:
             self._close_session()
+
+    def _flash_lock(self, progress: ProgressFn | None, control: OperationControl | None, *, back_to: str) -> dict:
+        """闪电锁上锁（header 已是 LOCKING）。没挪成（文件被占用等）时已经全部挪回，
+        状态退回 back_to；取消时留在 LOCKING，由调用方 recover(rollback=True)。"""
+        h = self.header
+        try:
+            stats = flash.lock(self, progress, control)
+        except Cancelled:
+            raise
+        except BaseException:
+            if not flash._load_map(self):  # 已经全部挪回原处
+                h.set_state(back_to)
+                self._save_header()
+            raise
+        h.file_count = stats["files"]
+        h.total_bytes = 0
+        h.set_state(C.LOCKED)
+        self._save_header()
+        return stats
 
     def _precheck_in_use(self) -> None:
         """上锁前看有没有外部程序（如 CT 脱敏工具）声明正在用这个保险箱里的文件。
@@ -924,7 +1047,7 @@ class Vault:
             raise VaultStateError("这个保险箱已经解锁了")
         if h.state != C.LOCKED:
             raise VaultStateError(f"当前状态不能解锁：{h.state}")
-        if not self.manifest_path.exists():
+        if not h.is_flash and not self.manifest_path.exists():
             raise IntegrityError("manifest.db 丢失：保险箱的元数据不见了，请从备份恢复，不要继续操作")
 
         if recovery_key is None:
@@ -946,6 +1069,15 @@ class Vault:
             h.failed_attempts = 0
             h.last_failed_at = ""
             self._save_header()
+
+        if h.is_flash:
+            h.set_state(C.UNLOCKING)
+            self._save_header()
+            stats = flash.unlock(self, progress, control)
+            h.set_state(C.UNLOCKED)
+            self._save_header()
+            self._record("UNLOCK", detail=f"闪电锁：{stats['files']} 项")
+            return stats
 
         self._open_session()
         try:
@@ -1209,10 +1341,20 @@ class Vault:
             raise VaultStateError("当前没有需要恢复的操作")
         if h.state == C.INCONSISTENT:
             raise VaultStateError("保险箱处于异常状态，当前版本不能自动恢复，请先备份并联系维护者")
-        if h.state == C.UNLOCKING and not self.manifest_path.exists():
+        if h.state == C.UNLOCKING and not h.is_flash and not self.manifest_path.exists():
             raise IntegrityError("manifest.db 丢失：无法恢复解锁操作，请从备份恢复")
 
         self._open_key(password=password, recovery_key=recovery_key, answers=answers)
+        if h.is_flash:
+            target_lock = (h.state == C.LOCKING) != rollback
+            was = h.state
+            stats = flash.recover(self, target_lock, progress)
+            h.file_count = stats["files"]
+            h.set_state(C.LOCKED if target_lock else C.UNLOCKED)
+            self._save_header()
+            action = "继续上锁" if target_lock else ("撤销上锁" if was == C.LOCKING else "继续解锁")
+            self._record("RECOVER", detail=f"闪电锁：{action}")
+            return {"files": stats["files"], "dirs": 0, "bytes": 0, "state": h.state, "action": action, "skipped": []}
         self._open_session()
         try:
             manifest = self._open_manifest()
@@ -1309,6 +1451,11 @@ class Vault:
             raise RecoveryNeededError(h.state)
         if h.state != C.LOCKED:
             raise VaultStateError("只有上锁状态才能做完整性校验（解锁时文件可被正常修改，校验没意义）")
+        if h.is_flash:
+            self._open_key(password=password, recovery_key=recovery_key, answers=answers)
+            result = flash.verify(self)
+            self._record("VERIFY", detail=f"闪电锁：{result['files']} 项，{len(result['problems'])} 项有问题")
+            return result
         if not self.manifest_path.exists():
             raise IntegrityError("manifest.db 丢失：保险箱的元数据不见了，请从备份恢复")
         self._open_key(password=password, recovery_key=recovery_key, answers=answers)
@@ -1492,26 +1639,10 @@ class Vault:
                 raise
             stats = {"files": h.file_count, "bytes": h.total_bytes}
             self._record("DISSOLVE", detail=f"{h.file_count} 个文件，以后不再加密")
-            protect.release(self.root)
-            os.unlink(long_path(self.header_path))
-            if self.marker_path.exists():
-                os.unlink(long_path(self.marker_path))
-            lock_file = self.vault_dir / "instance.lock"
-            for child in list(self.vault_dir.iterdir()):
-                if child == lock_file:
-                    continue  # 自己还拿着它（Windows 上删不掉打开着的文件），放锁后再删
-                if child.is_dir() and not child.is_symlink():
-                    shutil.rmtree(long_path(child), ignore_errors=True)
-                else:
-                    try:
-                        os.unlink(long_path(child))
-                    except OSError:
-                        pass
+            self._remove_vault_metadata()
         finally:
             self._release()
-        self.close()
-        self._flock = None
-        shutil.rmtree(long_path(self.vault_dir), ignore_errors=True)
+        self._finish_remove_vault_dir()
         self._emit(progress, "已解除", done_files=stats["files"], total_files=stats["files"])
         return stats
 

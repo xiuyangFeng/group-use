@@ -8,6 +8,14 @@ FORMAT_VERSION = 2
 # 版本 2：用密保问题代替恢复密钥。还带着恢复密钥、没有密保问题的 header 仍写成版本 1，
 # 这样旧版软件也能继续打开没升级过的保险箱。
 FORMAT_VERSION_LEGACY = 1
+# 版本 3：闪电锁（不加密，见 core/flash.py）。只有闪电锁保险箱写成版本 3，旧版软件会拒绝打开，
+# 不会把它当成加密保险箱乱动。加密保险箱照旧写版本 2。
+FORMAT_VERSION_FLASH = 3
+FORMAT_VERSION_MAX = FORMAT_VERSION_FLASH  # 能读的最高版本
+
+# 保险箱类型
+MODE_ENCRYPT = "encrypt"  # 加密：文件内容逐个加密（core/vault.py）
+MODE_FLASH = "flash"      # 闪电锁：不加密，把文件整个挪进 .vault/stash 藏起来并禁止访问（core/flash.py）
 
 # 保险箱内部目录（位于用户选择的文件夹根目录下）
 VAULT_DIRNAME = ".vault"
@@ -16,6 +24,8 @@ MANIFEST_NAME = "manifest.db"
 JOURNAL_NAME = "journal.jsonl"
 BLOBS_DIRNAME = "blobs"
 TMP_DIRNAME = "tmp"
+STASH_DIRNAME = "stash"        # 闪电锁：上锁时文件挪到这里（随机名字）
+FLASH_MAP_NAME = "flash.json"  # 闪电锁：随机名字 → 原名字的对照表（名字用密钥加密）
 
 # 给同事看的说明文件（不含敏感信息，不参与加密）
 MARKER_NAME = "如何解锁.txt"
@@ -23,6 +33,20 @@ MARKER_TEXT = """这个文件夹已经用「文件保险箱」上锁。
 
 里面的 .vault 文件夹是加密数据，删掉它等于删掉数据，请不要动。
 上锁期间整个文件夹被系统锁定：不能移动、改名或删除（访达里显示「已锁定」）。
+要搬到别处，请先用软件解锁，挪好以后再上锁。
+
+需要用的时候：
+1. 打开「文件保险箱」软件；
+2. 选中这个文件夹；
+3. 输入 6 位数字密码解锁（忘了就点「忘记密码？」，答对一个密保问题即可）。
+
+如果你不是这个文件夹的主人，请联系它的主人，不要尝试删除或移动里面的东西。
+"""
+
+MARKER_TEXT_FLASH = """这个文件夹已经用「文件保险箱」的闪电锁锁上。
+
+里面的文件都在 .vault 文件夹里（没有加密，只是藏起来并禁止访问），删掉它等于删掉数据，请不要动。
+上锁期间整个文件夹被系统锁定：不能移动、改名或删除。
 要搬到别处，请先用软件解锁，挪好以后再上锁。
 
 需要用的时候：

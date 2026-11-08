@@ -34,6 +34,7 @@ class Header:
     last_failed_at: str = ""
     # 密保问题：[{"q": 问题原文, "kind": 答案类型, "kdf": {..., "salt"}, "wrapped": {"n", "c"}}]
     questions: list = field(default_factory=list)
+    mode: str = C.MODE_ENCRYPT  # 加密 / 闪电锁（不加密）
 
     @property
     def has_recovery_key(self) -> bool:
@@ -48,9 +49,13 @@ class Header:
     def to_dict(self) -> dict:
         # 还是「恢复密钥、没有密保」的老样子就继续写版本 1，旧版软件也能打开
         legacy = self.has_recovery_key and not self.questions
+        if self.is_flash:
+            version = C.FORMAT_VERSION_FLASH
+        else:
+            version = C.FORMAT_VERSION_LEGACY if legacy else C.FORMAT_VERSION
         data = {
             "format": C.FORMAT,
-            "version": C.FORMAT_VERSION_LEGACY if legacy else C.FORMAT_VERSION,
+            "version": version,
             "vault_id": self.vault_id,
             "created_at": self.created_at,
             "kdf": self.kdf,
@@ -67,6 +72,8 @@ class Header:
         }
         if self.questions:
             data["security_questions"] = self.questions
+        if self.is_flash:
+            data["mode"] = C.MODE_FLASH
         return data
 
     @classmethod
@@ -74,7 +81,7 @@ class Header:
         try:
             if data.get("format") != C.FORMAT:
                 raise NotAVaultError(f"不认识的保险箱格式：{data.get('format')!r}")
-            if int(data.get("version", 0)) > C.FORMAT_VERSION:
+            if int(data.get("version", 0)) > C.FORMAT_VERSION_MAX:
                 raise NotAVaultError("这个保险箱是更新版本的软件创建的，请升级软件")
             return cls(
                 vault_id=str(data["vault_id"]),
@@ -91,6 +98,7 @@ class Header:
                 failed_attempts=int(data.get("failed_attempts", 0)),
                 last_failed_at=str(data.get("last_failed_at", "")),
                 questions=[dict(q) for q in (data.get("security_questions") or [])],
+                mode=C.MODE_FLASH if data.get("mode") == C.MODE_FLASH else C.MODE_ENCRYPT,
             )
         except KeyError as exc:
             raise NotAVaultError(f"header.json 缺少字段：{exc}")
@@ -112,6 +120,10 @@ class Header:
             state_since=ts,
             questions=questions,
         )
+
+    @property
+    def is_flash(self) -> bool:
+        return self.mode == C.MODE_FLASH
 
     @property
     def kdf_salt(self) -> bytes:

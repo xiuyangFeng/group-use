@@ -391,6 +391,11 @@ def main() -> int:
         pump()
         assert wiz.page_password.isComplete()
         assert "✓ 两次一致" in wiz.page_password.hint.text()
+        # 默认是闪电锁，并且明确提示「不加密」；这一轮测加密
+        assert wiz.page_password.mode() == C.MODE_FLASH and "不加密" in wiz.page_password.mode_note.text()
+        wiz.page_password.mode_encrypt.setChecked(True)
+        pump()
+        assert wiz.page_password.mode() == C.MODE_ENCRYPT and "不加密" not in wiz.page_password.mode_note.text()
         wiz.next()
         pump()
         assert wiz.currentId() == wiz.PAGE_QUESTIONS
@@ -420,6 +425,7 @@ def main() -> int:
             pump(0.02)
         assert wiz.created, "首次上锁没有完成"
         assert Vault(target).status()["state"] == C.LOCKED
+        assert Vault(target).status()["mode"] == C.MODE_ENCRYPT
         wiz._set_buttons_locked(False)
         wiz.accept()
         assert Vault(target).status()["questions"] == ["我的生日", "母亲的生日", "我出生的城市"]
@@ -429,6 +435,85 @@ def main() -> int:
         assert snapshot(target) == before
 
     check("新建向导：选文件夹→6 位密码→3 个密保→首次上锁→数据完整", _wizard)
+
+    def _wizard_cancel():
+        import gui.wizard as wz
+        from core.control import OperationControl
+
+        target = tmp / "不想加密了"
+        target.mkdir()
+        make_tree(target)
+        before = snapshot(target)
+
+        class PausedControl(OperationControl):  # 一开始就停在第一个安全点，保证点取消时还在加密中
+            def __init__(self):
+                super().__init__()
+                self.pause()
+
+        asked = []
+        orig_control, orig_question = wz.OperationControl, wz.QMessageBox.question
+        wz.OperationControl = PausedControl
+        wz.QMessageBox.question = staticmethod(lambda *a, **k: (asked.append(a[2]), wz.QMessageBox.Yes)[1])
+        try:
+            wiz = CreateWizard(None, AppStore(cfg / "store_cancel"), initial_path=str(target))
+            wiz.show()
+            wiz.prepare(PASSWORD, QUESTIONS, C.MODE_ENCRYPT)
+            wiz.begin_initial_lock(wiz.page_progress)
+            pump(0.2)
+            assert wiz.worker.isRunning() and wiz.button(wz.QWizard.CancelButton).isEnabled(), "加密中「取消」应该能点"
+            wiz.reject()  # 点「取消」/ 关窗口
+            deadline = time.time() + 60
+            while not wiz.cancelled_create and time.time() < deadline:
+                pump(0.02)
+        finally:
+            wz.OperationControl, wz.QMessageBox.question = orig_control, orig_question
+        assert asked and "还原" in asked[0], asked
+        assert wiz.cancelled_create and not wiz.created, "取消后应该还原完成"
+        assert not wiz.isVisible()
+        assert not (target / C.VAULT_DIRNAME).exists() and not (target / C.MARKER_NAME).exists()
+        assert snapshot(target) == before
+
+    check("新建向导：加密中途取消→还原成普通文件夹", _wizard_cancel)
+
+    def _wizard_flash():
+        target = tmp / "闪电锁数据"
+        target.mkdir()
+        make_tree(target)
+        before = snapshot(target)
+        s = AppStore(cfg / "store_flash")
+        wiz = CreateWizard(None, s, initial_path=str(target))
+        wiz.show()
+        pump()
+        assert wiz.page_password.mode() == C.MODE_FLASH
+        wiz.prepare(PASSWORD, QUESTIONS)
+        t0 = time.time()
+        wiz.begin_initial_lock(wiz.page_progress)
+        deadline = time.time() + 30
+        while not wiz.created and time.time() < deadline:
+            pump(0.02)
+        assert wiz.created, "闪电锁没有完成"
+        st = Vault(target).status()
+        assert st["state"] == C.LOCKED and st["mode"] == C.MODE_FLASH, st
+        assert sorted(p.name for p in target.iterdir()) == sorted([C.VAULT_DIRNAME, C.MARKER_NAME])
+        assert time.time() - t0 < 10
+        wiz._set_buttons_locked(False)
+        wiz.accept()
+        # 主窗口卡片上要写明「闪电锁（不加密）」
+        s.add_vault(target)
+        w = mw.MainWindow(s)
+        try:
+            pump()
+            subs = [c._sub_text() for c in w.findChildren(mw.VaultCard)]
+            assert any("闪电锁（不加密）" in t for t in subs), subs
+        finally:
+            w._quitting = True
+            w.close()
+        v = Vault(target, audit_dir=cfg)
+        v.unlock(password=PASSWORD)
+        v.close()
+        assert snapshot(target) == before
+
+    check("新建向导：闪电锁（默认）→1 秒锁上→卡片标明不加密→解锁数据完整", _wizard_flash)
 
     _say("== 后台线程 ==")
 

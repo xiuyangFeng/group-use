@@ -21,10 +21,12 @@
 
 已完成部分的结论：
 
-- **加密与断电恢复**：246 个自动化测试 + 21 种强制断电场景 + 120 次随机杀进程压力测试全部通过，
+- **加密与断电恢复**：289 个自动化测试 + 21 种强制断电场景 + 120 次随机杀进程压力测试全部通过，
   恢复后数据 **0 字节丢失**（见 [测试报告 M1](docs/测试报告-M1.md)）。
 - **图形界面**：新建向导 → 首次上锁 → 解锁 → 上锁 → 恢复 → 审计全流程跑通；
-  25 项 GUI 自检全过（见 [测试报告 M2](docs/测试报告-M2.md)）。
+  27 项 GUI 自检全过（见 [测试报告 M2](docs/测试报告-M2.md)）。
+- **闪电锁**（不加密）：新建时可选，上百 GB 也 1 秒左右锁上 / 打开（只是藏起来 + 禁止访问，见 [使用说明](docs/使用说明.md)）。
+  敏感数据请选「加密」。
 - **上锁后防移动 / 删除**（0.5.0）：上锁完成后整个文件夹被系统锁定，拖走、改名、删除、改写 `.vault` 都会被拒绝；
   解锁、改密码、校验时程序自己临时撤掉，结束后再加回。旧版本锁的保险箱打开软件时自动补上。
 
@@ -70,7 +72,7 @@ python3 -m venv .venv
 
 # 2. 跑测试（看全部通过；本机跳过 3 项 Windows 专用检查）
 .venv/bin/python -m pytest tests -q
-.venv/bin/python scripts/gui_selftest.py     # 图形界面 25 项自检
+.venv/bin/python scripts/gui_selftest.py     # 图形界面 27 项自检
 
 # 3. 命令行版：拿一个测试文件夹试真实流程
 mkdir -p /tmp/测试保险箱 && echo "机密内容" > /tmp/测试保险箱/患者名单.txt
@@ -155,7 +157,7 @@ mkdir -p /tmp/测试保险箱 && echo "机密内容" > /tmp/测试保险箱/患�
 
 2. **GitHub Actions 自动打**：本仓库的 `.github/workflows/build.yml`（单独推本目录时用），
    或组内私有仓库 `group-use` 的 `.github/workflows/build-vault.yml`（同时管两个子项目），
-   每个平台自动跑 245 个测试 + 25 项 GUI 自检 + 打包，产物在 Actions 的 Artifacts / Releases 里。
+   每个平台自动跑 289 个测试 + 27 项 GUI 自检 + 打包，产物在 Actions 的 Artifacts / Releases 里。
 
 安装说明（发给组里同事看）：
 
@@ -195,7 +197,7 @@ mkdir -p /tmp/测试保险箱 && echo "机密内容" > /tmp/测试保险箱/患�
 │   ├── selfcheck.py  打包自检（--selftest）
 │   ├── store.py      界面配置、空闲时间检测
 │   └── style.py      配色、控件样式、图标
-├── tests/            246 个自动化测试（含断电注入）
+├── tests/            289 个自动化测试（含断电注入）
 ├── scripts/          压力测试 / 性能测试 / GUI 自检 / 截图 / 打包
 ├── docs/             需求、技术方案、界面草图、测试报告、界面实拍
 └── README.md

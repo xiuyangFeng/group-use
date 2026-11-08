@@ -112,9 +112,23 @@ def _vault_entries(root: Path) -> tuple[list[Path], list[Path]]:
         files.append(marker)
     if vault_dir.is_dir() and not vault_dir.is_symlink():
         for dirpath, dirnames, filenames in os.walk(vault_dir, followlinks=False):
+            if Path(dirpath) == vault_dir and C.STASH_DIRNAME in dirnames:
+                # 闪电锁：只保护 stash 目录本身，不进去逐个处理用户的文件（几十万个也要 1 秒内锁上）
+                dirnames.remove(C.STASH_DIRNAME)
+                dirs.append(vault_dir / C.STASH_DIRNAME)
             dirs.append(Path(dirpath))
             files.extend(Path(dirpath) / f for f in filenames)
     return dirs, files
+
+
+def _stash(root: Path) -> Path:
+    return root / C.VAULT_DIRNAME / C.STASH_DIRNAME
+
+
+def _is_flash(root: Path) -> bool:
+    """闪电锁保险箱一定有 .vault/stash（建的时候就建好），加密保险箱没有。"""
+    p = _stash(root)
+    return p.is_dir() and not p.is_symlink()
 
 
 # ---------------------------------------------------------------- 对外
@@ -162,12 +176,16 @@ def _win_is_our_parent_rule(rules: list[str]) -> bool:
 
 
 def _apply_windows(root: Path) -> bool:
-    ok = _run(["icacls", str(root), "/deny", WIN_DENY, "/C", "/Q"])
+    if _is_flash(root):
+        ok = _apply_windows_flash(root)
+    else:
+        ok = _run(["icacls", str(root), "/deny", WIN_DENY, "/C", "/Q"])
     parent = root.parent
     if ok and parent != root:
         existing = _win_everyone_denies(parent)
         if not existing:
-            _run(["icacls", str(parent), "/deny", WIN_PARENT_DENY, "/Q"])
+            # 只改父目录自己（不用 icacls：它会把父目录下整棵树的权限重写一遍，桌面上东西多时很慢）
+            _win_add_deny(parent, WIN_MASK_DELETE_CHILD)
         # existing 是我们之前加的（同目录下另一个保险箱）就不用再加；是别人的规则就不碰
     return ok
 
@@ -187,16 +205,242 @@ def _win_locked_siblings(parent: Path, exclude: Path) -> bool:
 
 
 def _release_windows(root: Path) -> None:
+    if _is_flash(root):
+        _release_windows_flash(root)
     # 没加过规则就别调 /remove:d：它照样会重写整棵树的继承权限，每个文件的「状态改变时间」
     # 都会变，增量上锁就会把没改过的文件全当成改过的重新加密（文件多时也很慢）。
     # 读不到（None）时宁可照旧撤一次。
-    if _win_everyone_denies_or_none(root) != []:
+    elif _win_everyone_denies_or_none(root) != []:
         _run(["icacls", str(root), "/remove:d", WIN_EVERYONE, "/C", "/Q"])
     parent = root.parent
     if parent == root:
         return
     if _win_is_our_parent_rule(_win_everyone_denies(parent)) and not _win_locked_siblings(parent, root):
-        _run(["icacls", str(parent), "/remove:d", WIN_EVERYONE, "/Q"])
+        _win_remove_denies(parent)
+
+
+# ---------------------------------------------------------------- Windows：只改单个对象的权限（不往下传）
+#
+# icacls / SetNamedSecurityInfo 改一个目录的权限时会把整棵子树重算一遍（几十万个文件要很久，
+# 还会改掉每个文件的「状态改变时间」）。老接口 SetFileSecurityW 只改这一个对象，不往下传。
+# 闪电锁只在少数几个对象上加「不可继承」的拒绝规则，正好用它：1 秒内加完 / 撤完。
+
+WIN_MASK_LIST = 0x0001          # FILE_LIST_DIRECTORY：列出目录内容
+WIN_MASK_DELETE_CHILD = 0x0040  # FILE_DELETE_CHILD
+WIN_MASK_DELETE = 0x10000       # DELETE
+WIN_FLASH_DIR = WIN_MASK_DELETE | WIN_MASK_DELETE_CHILD
+WIN_FLASH_STASH = WIN_FLASH_DIR | WIN_MASK_LIST
+WIN_FLASH_FILE = WIN_MASK_DELETE
+_OUR_MASKS = {WIN_FLASH_DIR, WIN_FLASH_STASH, WIN_FLASH_FILE, WIN_MASK_DELETE_CHILD}
+
+# SDDL 里权限可能写成字母（按目录服务权限的名字），换算回数值
+_SDDL_RIGHTS = {
+    "CC": 0x1, "DC": 0x2, "LC": 0x4, "SW": 0x8, "RP": 0x10, "WP": 0x20, "DT": 0x40, "LO": 0x80,
+    "CR": 0x100, "SD": 0x10000, "RC": 0x20000, "WD": 0x40000, "WO": 0x80000,
+    "GA": 0x10000000, "GX": 0x20000000, "GW": 0x40000000, "GR": 0x80000000,
+    "FA": 0x1F01FF, "FR": 0x120089, "FW": 0x120116, "FX": 0x1200A0,
+}
+
+
+def _sddl_mask(text: str) -> int | None:
+    text = text.strip()
+    if text.lower().startswith("0x"):
+        try:
+            return int(text, 16)
+        except ValueError:
+            return None
+    if len(text) % 2:
+        return None
+    total = 0
+    for i in range(0, len(text), 2):
+        v = _SDDL_RIGHTS.get(text[i : i + 2].upper())
+        if v is None:
+            return None
+        total |= v
+    return total
+
+
+def _split_dacl(sddl: str) -> tuple[str, str, list[str], str] | None:
+    """把 SDDL 拆成 (D: 之前, D:标志, [ACE...], 之后)。只认识 DACL 部分。"""
+    i = sddl.find("D:")
+    if i < 0:
+        return None
+    j = i + 2
+    while j < len(sddl) and sddl[j] not in "(":
+        if sddl[j] == ":":  # 下一段（S: 等）
+            break
+        j += 1
+    flags = sddl[i + 2 : j]
+    aces: list[str] = []
+    k = j
+    while k < len(sddl) and sddl[k] == "(":
+        end = sddl.find(")", k)
+        if end < 0:
+            return None
+        aces.append(sddl[k : end + 1])
+        k = end + 1
+    return sddl[:i], flags, aces, sddl[k:]
+
+
+def _is_our_ace(ace: str) -> bool:
+    parts = ace[1:-1].split(";")
+    if len(parts) < 6:
+        return False
+    kind, aflags, rights, _obj, _inh, sid = parts[:6]
+    return (
+        kind == "D"
+        and aflags == ""  # 不可继承、不是继承来的
+        and sid.upper() in ("WD", "S-1-1-0")
+        and _sddl_mask(rights) in _OUR_MASKS
+    )
+
+
+def _win_api():
+    import ctypes
+    from ctypes import wintypes
+
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    adv.GetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    adv.GetFileSecurityW.restype = wintypes.BOOL
+    adv.SetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
+    adv.SetFileSecurityW.restype = wintypes.BOOL
+    adv.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+    ]
+    adv.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = wintypes.BOOL
+    adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+    ]
+    adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    k32.LocalFree.argtypes = [ctypes.c_void_p]
+    k32.LocalFree.restype = ctypes.c_void_p
+    k32.SetFileAttributesW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD]
+    k32.SetFileAttributesW.restype = wintypes.BOOL
+    k32.GetFileAttributesW.argtypes = [wintypes.LPCWSTR]
+    k32.GetFileAttributesW.restype = wintypes.DWORD
+    return ctypes, wintypes, adv, k32
+
+
+_DACL_INFO = 0x4  # DACL_SECURITY_INFORMATION
+
+
+def _win_get_dacl(path: Path) -> str | None:
+    try:
+        ctypes, wintypes, adv, k32 = _win_api()
+    except (OSError, AttributeError):
+        return None
+    from .fsutil import long_path
+
+    p = long_path(path)
+    need = wintypes.DWORD(0)
+    adv.GetFileSecurityW(p, _DACL_INFO, None, 0, ctypes.byref(need))
+    if not need.value:
+        return None
+    buf = ctypes.create_string_buffer(need.value)
+    if not adv.GetFileSecurityW(p, _DACL_INFO, buf, need, ctypes.byref(need)):
+        return None
+    out = ctypes.c_void_p()
+    if not adv.ConvertSecurityDescriptorToStringSecurityDescriptorW(buf, 1, _DACL_INFO, ctypes.byref(out), None):
+        return None
+    try:
+        return ctypes.wstring_at(out.value)
+    finally:
+        k32.LocalFree(out)
+
+
+def _win_set_dacl(path: Path, sddl: str) -> bool:
+    try:
+        ctypes, _wintypes, adv, k32 = _win_api()
+    except (OSError, AttributeError):
+        return False
+    from .fsutil import long_path
+
+    psd = ctypes.c_void_p()
+    if not adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(psd), None):
+        return False
+    try:
+        return bool(adv.SetFileSecurityW(long_path(path), _DACL_INFO, psd))
+    finally:
+        k32.LocalFree(psd)
+
+
+def _win_add_deny(path: Path, mask: int) -> bool:
+    """在 path 自己的 DACL 最前面加一条「Everyone 拒绝 mask」（不可继承）。已经有就不重复加。"""
+    sddl = _win_get_dacl(path)
+    parts = _split_dacl(sddl) if sddl else None
+    if parts is None:
+        return False
+    head, flags, aces, tail = parts
+    if any(_is_our_ace(a) and _sddl_mask(a[1:-1].split(";")[2]) == mask for a in aces):
+        return True
+    aces = [f"(D;;0x{mask:x};;;WD)"] + aces
+    return _win_set_dacl(path, f"{head}D:{flags}{''.join(aces)}{tail}")
+
+
+def _win_remove_denies(path: Path) -> bool:
+    """去掉 path 上我们加的那几种拒绝规则（不碰别人的，也不往下传）。"""
+    sddl = _win_get_dacl(path)
+    parts = _split_dacl(sddl) if sddl else None
+    if parts is None:
+        return False
+    head, flags, aces, tail = parts
+    keep = [a for a in aces if not _is_our_ace(a)]
+    if len(keep) == len(aces):
+        return True
+    return _win_set_dacl(path, f"{head}D:{flags}{''.join(keep)}{tail}")
+
+
+def _win_hide(path: Path) -> None:
+    """资源管理器里默认看不见（隐藏 + 系统，「受保护的操作系统文件」）。"""
+    try:
+        _ctypes, _wt, _adv, k32 = _win_api()
+    except (OSError, AttributeError):
+        return
+    from .fsutil import long_path
+
+    p = long_path(path)
+    attrs = k32.GetFileAttributesW(p)
+    if attrs == 0xFFFFFFFF:
+        return
+    k32.SetFileAttributesW(p, attrs | 0x2 | 0x4)  # HIDDEN | SYSTEM
+
+
+def _flash_objects(root: Path) -> list[tuple[Path, int]]:
+    """闪电锁在 Windows 上要加规则的对象：根目录、.vault 和里面的目录、元数据文件、说明文件、stash。"""
+    vd = root / C.VAULT_DIRNAME
+    out: list[tuple[Path, int]] = [(root, WIN_FLASH_DIR), (vd, WIN_FLASH_DIR)]
+    marker = root / C.MARKER_NAME
+    if marker.is_file():
+        out.append((marker, WIN_FLASH_FILE))
+    try:
+        children = list(vd.iterdir())
+    except OSError:
+        children = []
+    for c in children:
+        if c.name == C.STASH_DIRNAME:
+            out.append((c, WIN_FLASH_STASH))
+        elif c.name == "instance.lock" or c.is_symlink():
+            continue
+        elif c.is_dir():
+            out.append((c, WIN_FLASH_DIR))
+        else:
+            out.append((c, WIN_FLASH_FILE))
+    return out
+
+
+def _apply_windows_flash(root: Path) -> bool:
+    ok = True
+    for p, mask in _flash_objects(root):
+        ok = _win_add_deny(p, mask) and ok
+    _win_hide(root / C.VAULT_DIRNAME)
+    return ok
+
+
+def _release_windows_flash(root: Path) -> None:
+    # 先撤 stash 的（撤之前列不出它里面的东西，但它本身的权限能改），顺序无所谓
+    for p, _mask in _flash_objects(root):
+        _win_remove_denies(p)
 
 
 def apply(root: str | os.PathLike) -> bool:
@@ -237,6 +481,12 @@ def _apply_mac(root: Path) -> bool:
     for d in dirs:
         if not _has_mac_acl(d):
             _run(["chmod", "+a", MAC_ACL, str(d)])
+    stash = _stash(root)
+    if _is_flash(root):
+        try:
+            os.chmod(stash, 0)  # 闪电锁：谁都列不出、进不去（主人自己也要先改回权限）
+        except OSError:
+            pass
     ok = True
     for f in files:
         if f == lock_file:
@@ -256,6 +506,11 @@ def _release_mac(root: Path) -> None:
         _set_immutable(d, False)
     for f in files:
         _set_immutable(f, False)
+    if _is_flash(root):
+        try:
+            os.chmod(_stash(root), 0o700)
+        except OSError:
+            pass
     for d in dirs:
         if _has_mac_acl(d):
             _run(["chmod", "-a", MAC_ACL, str(d)])
@@ -280,6 +535,10 @@ def release_tree(path: str | os.PathLike) -> None:
     if not path.exists():
         return
     if IS_WINDOWS:
+        for dirpath, dirnames, _ in os.walk(path, followlinks=False):
+            if C.VAULT_DIRNAME in dirnames and _is_flash(Path(dirpath)):
+                _release_windows_flash(Path(dirpath))
+                _win_remove_denies(Path(dirpath).parent)
         _run(["icacls", str(path), "/remove:d", WIN_EVERYONE, "/T", "/C", "/Q"])
         return
     if not IS_MAC:

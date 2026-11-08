@@ -241,7 +241,8 @@ def cmd_create(args) -> int:
     pairs = ask_questions(reader)
     pp = ProgressPrinter(_progress_enabled(args))
     try:
-        result = vault.create(password, pairs, progress=pp)
+        mode = C.MODE_FLASH if getattr(args, "flash", False) else C.MODE_ENCRYPT
+        result = vault.create(password, pairs, progress=pp, mode=mode)
     finally:
         pp.done()
 
@@ -308,7 +309,10 @@ def cmd_lock(args) -> int:
         _json_dump({"ok": True, **stats})
         return EXIT["ok"]
     print(f"✔ 已上锁：{vault.root}")
-    print(f"  {stats['files']} 个文件 / {fsutil.human_bytes(stats['bytes'])} 已加密保存。")
+    if getattr(args, "flash", False):
+        print(f"  闪电锁：{stats['files']} 项已藏起来（没有加密）。")
+    else:
+        print(f"  {stats['files']} 个文件 / {fsutil.human_bytes(stats['bytes'])} 已加密保存。")
     if stats.get("skipped"):
         print(f"  注意：{len(stats['skipped'])} 个符号链接/特殊文件没有加密，仍以明文留在文件夹里。")
     return EXIT["ok"]
@@ -323,7 +327,10 @@ def cmd_status(args) -> int:
     print(f"保险箱：{st['root']}")
     print(f"状态：  {STATE_LABEL.get(st['state'], st['state'])}")
     print(f"创建：  {st['created_at']}")
-    print(f"内容：  {st['file_count']} 个文件 / {fsutil.human_bytes(st['total_bytes'])}")
+    if st.get("mode") == C.MODE_FLASH:
+        print(f"类型：  闪电锁（不加密，{st['file_count']} 项）")
+    else:
+        print(f"内容：  {st['file_count']} 个文件 / {fsutil.human_bytes(st['total_bytes'])}")
     if st["questions"]:
         print("密保问题：" + " / ".join(st["questions"]))
     else:
@@ -556,6 +563,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("create", help="创建保险箱并上锁")
     common(sp)
+    sp.add_argument("--flash", action="store_true", help="闪电锁：不加密，只藏起来并禁止访问，1 秒左右完成")
     sp.set_defaults(func=cmd_create)
 
     def cred_opts(sp):

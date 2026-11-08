@@ -76,6 +76,45 @@ def _busy_macos(paths: list[Path]) -> list[Path]:
     return [p for p, k in zip(paths, keys) if k in busy_names]
 
 
+def busy_under(root: str | os.PathLike, exclude_top: set[str] | frozenset = frozenset()) -> list[str]:
+    """root 下面正被其它程序打开的普通文件（macOS，一次 lsof，不用先扫目录）。
+
+    闪电锁上锁前用：几十万个文件也不用逐个列出来。其它系统返回空列表
+    （Windows 上被打开的文件所在的文件夹改不了名，改名时自然会失败）。"""
+    if sys.platform != "darwin":
+        return []
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["lsof", "-n", "-P", "-w", "-F", "tn"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode not in (0, 1):
+        return []
+    prefix = os.path.realpath(os.fspath(root)).rstrip("/") + "/"
+    skip = tuple(prefix + n + "/" for n in exclude_top)
+    out: list[str] = []
+    ftype = ""
+    for line in proc.stdout.splitlines():
+        if line.startswith("t"):
+            ftype = line[1:]
+        elif line.startswith("n"):
+            name = line[1:]
+            if ftype == "REG" and name.startswith(prefix) and not name.startswith(skip):
+                if name not in out:
+                    out.append(name)
+        elif line.startswith("p") or line.startswith("f"):
+            ftype = ""
+    return out
+
+
 def busy_files(paths: list[Path]) -> list[Path]:
     """返回正在被其它程序占用的文件（best effort）。
 

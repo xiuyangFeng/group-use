@@ -15,12 +15,15 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLineEdit,
     QMessageBox,
+    QButtonGroup,
     QProgressBar,
+    QRadioButton,
     QVBoxLayout,
     QWizard,
     QWizardPage,
 )
 
+from core import constants as C
 from core import fsutil
 from core.control import OperationControl
 from core.errors import VaultError
@@ -97,7 +100,7 @@ class FolderPage(QWizardPage):
             self.hint.setText(problem)
             self.hint.setStyleSheet(f"color:{RED};")
         else:
-            self.hint.setText(f"将加密「{self._path().name}」及其中所有文件")
+            self.hint.setText(f"将上锁「{self._path().name}」及其中所有文件")
             self.hint.setStyleSheet(f"color:{MUTED};")
 
 
@@ -119,10 +122,44 @@ class PasswordPage(QWizardPage):
         self.pw1, self.pw2 = self.pair.pw1, self.pair.pw2
         self.rules, self.hint, self.show_pw = self.pair.rules, self.pair.hint, self.pair.show_pw
 
+        # 上锁方式：闪电锁（秒锁，不加密）/ 加密（真加密，耗时和文件大小有关）
+        lay.addSpacing(6)
+        mode_title = label("上锁方式")
+        mode_title.setStyleSheet("font-weight:600;")
+        lay.addWidget(mode_title)
+        self.mode_flash = QRadioButton("闪电锁：1 秒左右锁上 / 打开，文件再大也一样")
+        self.mode_encrypt = QRadioButton("加密：把每个文件真正加密，时间和文件大小有关")
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.mode_flash)
+        self.mode_group.addButton(self.mode_encrypt)
+        self.mode_flash.setChecked(True)
+        lay.addWidget(self.mode_flash)
+        lay.addWidget(self.mode_encrypt)
+        self.mode_note = label("", role="muted", wrap=True)
+        lay.addWidget(self.mode_note)
+        self.mode_flash.toggled.connect(self._mode_changed)
+
         lay.addStretch(1)
-        note = label("首次上锁会改写文件夹里的全部文件，重要数据请先备份。", role="muted", wrap=True)
-        note.setAlignment(Qt.AlignCenter)
-        lay.addWidget(note)
+        self.note = label("", role="muted", wrap=True)
+        self.note.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self.note)
+        self._mode_changed()
+
+    def mode(self) -> str:
+        return C.MODE_FLASH if self.mode_flash.isChecked() else C.MODE_ENCRYPT
+
+    def _mode_changed(self, *_a) -> None:
+        if self.mode() == C.MODE_FLASH:
+            self.mode_note.setText(
+                "⚠ 闪电锁不加密：文件只是藏起来并禁止访问，防同一台电脑上随手翻看。"
+                "硬盘被拆走、换个系统或有人用管理员权限，仍能看到内容。"
+            )
+            self.mode_note.setStyleSheet("color:#b26a00;")
+            self.note.setText("重要数据请先备份。")
+        else:
+            self.mode_note.setText("硬盘被拆走也看不到内容。解锁 / 上锁要把文件读写一遍，几十 GB 需要几分钟。")
+            self.mode_note.setStyleSheet(f"color:{MUTED};")
+            self.note.setText("首次上锁会改写文件夹里的全部文件，重要数据请先备份。")
 
     def initializePage(self) -> None:  # noqa: N802
         name = Path(self.wiz.target).name if self.wiz.target else ""
@@ -250,7 +287,21 @@ class ProgressPage(QWizardPage):
         self.status.setStyleSheet(f"color:{GREEN};font-weight:600;")
         self.warn.setText("")
 
+    def show_cancelling(self) -> None:
+        self.head_title.setText("正在取消…")
+        self.status.setText("等当前文件处理完")
+        self.status.setStyleSheet("")
+
+    def show_rolling_back(self) -> None:
+        self.head_title.setText("正在撤销…")
+        self.status.setText("把已经加密的文件还原")
+        self.status.setStyleSheet("")
+        self.detail.setText("")
+        self.bar.setRange(0, 0)
+        self.warn.setText("撤销完成前请不要关机。")
+
     def fail(self, msg: str) -> None:
+        self.bar.setRange(0, 100)
         self.status.setText("没有完成")
         self.status.setStyleSheet(f"color:{RED};font-weight:600;")
         self.detail.setText(msg)
@@ -275,6 +326,8 @@ class CreateWizard(QWizard):
         self.created = False
         self.control: OperationControl | None = None
         self.worker: VaultOpWorker | None = None
+        self.cancel_worker: VaultOpWorker | None = None
+        self.cancelled_create = False  # 首次上锁中途取消、已还原成普通文件夹
 
         self.setWindowTitle("新建保险箱")
         self.setWizardStyle(QWizard.ClassicStyle)
@@ -314,11 +367,11 @@ class CreateWizard(QWizard):
 
     # ---------------------------------------------------------------- 准备
 
-    def prepare(self, password: str, questions: list[tuple[str, str]]) -> None:
+    def prepare(self, password: str, questions: list[tuple[str, str]], mode: str | None = None) -> None:
         if self.prepared is not None:
             self._abort_prepared()
         self.vault = Vault(self.target, audit_dir=self.audit_dir)
-        self.prepared = self.vault.prepare_new(password, questions)
+        self.prepared = self.vault.prepare_new(password, questions, mode=mode or self.page_password.mode())
         self.prepared_password = password
 
     def _abort_prepared(self) -> None:
@@ -342,8 +395,50 @@ class CreateWizard(QWizard):
         self.worker.progressed.connect(page.update_progress)
         self.worker.succeeded.connect(lambda _r: self._created(page))
         self.worker.failed.connect(lambda n, m: self._failed(page, m))
+        self.worker.cancelled.connect(lambda: self._roll_back(page))
         self._set_buttons_locked(True)
+        cancel = self.button(QWizard.CancelButton)
+        cancel.setEnabled(True)  # 加密过程中也能取消：会把已加密的文件还原
         self.worker.start()
+
+    def _request_cancel(self) -> None:
+        """加密进行中点了「取消」/ 关窗口：确认后安全停下并还原。"""
+        if self.control is None or self.control.cancelled:
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "不加密了？",
+                "会把已经加密的文件还原，文件夹变回原来的样子，文件不会丢。确定取消？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        if self.worker is None or not self.worker.isRunning() or self.created:
+            return  # 确认框弹着的时候已经做完了
+        self.button(QWizard.CancelButton).setEnabled(False)
+        self.page_progress.show_cancelling()
+        self.control.cancel()
+
+    def _roll_back(self, page: ProgressPage) -> None:
+        page.show_rolling_back()
+        self._set_buttons_locked(True)
+        self.cancel_worker = VaultOpWorker(self.vault, "cancel_create", parent=self)
+        self.cancel_worker.succeeded.connect(lambda _r: self._rolled_back())
+        self.cancel_worker.failed.connect(lambda n, m: self._failed(page, f"撤销没有完成：{m}"))
+        self.cancel_worker.start()
+
+    def _rolled_back(self) -> None:
+        self.cancelled_create = True
+        if self.vault is not None:
+            self.vault.close()
+        self.vault = None
+        self.prepared = None
+        self.prepared_password = ""
+        self._set_buttons_locked(False)
+        QWizard.reject(self)
 
     def _created(self, page: ProgressPage) -> None:
         self.created = True
@@ -375,11 +470,17 @@ class CreateWizard(QWizard):
     # ---------------------------------------------------------------- 关闭
 
     def _busy_box(self) -> None:
-        QMessageBox.information(self, "正在上锁", "请等它完成，大约几秒到几分钟。")
+        QMessageBox.information(self, "正在撤销", "正在把已经加密的文件还原，请等它完成。")
+
+    def _busy(self) -> bool:
+        return any(w is not None and w.isRunning() for w in (self.worker, self.cancel_worker))
 
     def reject(self) -> None:
-        if self.worker is not None and self.worker.isRunning():
+        if self.cancel_worker is not None and self.cancel_worker.isRunning():
             self._busy_box()
+            return
+        if self.worker is not None and self.worker.isRunning():
+            self._request_cancel()
             return
         if self.prepared is not None and not self.created:
             # 还没开始首次上锁：恢复原样（文件夹里全是明文，删掉 .vault 即可）
@@ -393,8 +494,8 @@ class CreateWizard(QWizard):
         super().accept()
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self.worker is not None and self.worker.isRunning():
-            self._busy_box()
+        if self._busy():
             event.ignore()
+            self.reject()  # 加密中：问要不要取消；撤销中：请稍等
             return
         super().closeEvent(event)
