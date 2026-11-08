@@ -392,10 +392,12 @@ def main() -> int:
         assert wiz.page_password.isComplete()
         assert "✓ 两次一致" in wiz.page_password.hint.text()
         # 默认是闪电锁，并且明确提示「不加密」；这一轮测加密
-        assert wiz.page_password.mode() == C.MODE_FLASH and "不加密" in wiz.page_password.mode_note.text()
+        assert wiz.page_password.mode() == C.MODE_FLASH and "不加密" in wiz.page_password.mode_flash.text()
+        # 密码框不能被压扁（内容多的时候 Qt 会压缩控件高度）
+        assert wiz.page_password.pw1.height() >= 40 and wiz.page_password.pw2.height() >= 40, wiz.page_password.pw1.height()
         wiz.page_password.mode_encrypt.setChecked(True)
         pump()
-        assert wiz.page_password.mode() == C.MODE_ENCRYPT and "不加密" not in wiz.page_password.mode_note.text()
+        assert wiz.page_password.mode() == C.MODE_ENCRYPT
         wiz.next()
         pump()
         assert wiz.currentId() == wiz.PAGE_QUESTIONS

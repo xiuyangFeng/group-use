@@ -37,6 +37,7 @@ def pin_edit(placeholder: str) -> QLineEdit:
     edit.setMaxLength(C.PASSWORD_LEN)
     edit.setValidator(QRegularExpressionValidator(QRegularExpression(rf"\d{{0,{C.PASSWORD_LEN}}}"), edit))
     edit.setInputMethodHints(Qt.ImhDigitsOnly)
+    edit.setMinimumHeight(40)  # 页面内容多时也不许被压扁（压扁后提示文字只剩半截）
     return edit
 
 

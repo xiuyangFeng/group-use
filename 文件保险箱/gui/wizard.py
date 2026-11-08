@@ -127,16 +127,19 @@ class PasswordPage(QWizardPage):
         mode_title = label("上锁方式")
         mode_title.setStyleSheet("font-weight:600;")
         lay.addWidget(mode_title)
-        self.mode_flash = QRadioButton("闪电锁：1 秒左右锁上 / 打开，文件再大也一样")
+        self.mode_flash = QRadioButton("闪电锁（不加密）：1 秒左右锁上 / 打开，文件再大也一样")
+        self.mode_flash.setToolTip(
+            "文件只是藏起来并禁止访问，防同一台电脑上随手翻看；\n"
+            "硬盘被拆走、换个系统或有人用管理员权限，仍能看到内容。"
+        )
         self.mode_encrypt = QRadioButton("加密：把每个文件真正加密，时间和文件大小有关")
+        self.mode_encrypt.setToolTip("硬盘被拆走也看不到内容。解锁 / 上锁要把文件读写一遍，几十 GB 需要几分钟。")
         self.mode_group = QButtonGroup(self)
         self.mode_group.addButton(self.mode_flash)
         self.mode_group.addButton(self.mode_encrypt)
         self.mode_flash.setChecked(True)
         lay.addWidget(self.mode_flash)
         lay.addWidget(self.mode_encrypt)
-        self.mode_note = label("", role="muted", wrap=True)
-        lay.addWidget(self.mode_note)
         self.mode_flash.toggled.connect(self._mode_changed)
 
         lay.addStretch(1)
@@ -150,15 +153,8 @@ class PasswordPage(QWizardPage):
 
     def _mode_changed(self, *_a) -> None:
         if self.mode() == C.MODE_FLASH:
-            self.mode_note.setText(
-                "⚠ 闪电锁不加密：文件只是藏起来并禁止访问，防同一台电脑上随手翻看。"
-                "硬盘被拆走、换个系统或有人用管理员权限，仍能看到内容。"
-            )
-            self.mode_note.setStyleSheet("color:#b26a00;")
             self.note.setText("重要数据请先备份。")
         else:
-            self.mode_note.setText("硬盘被拆走也看不到内容。解锁 / 上锁要把文件读写一遍，几十 GB 需要几分钟。")
-            self.mode_note.setStyleSheet(f"color:{MUTED};")
             self.note.setText("首次上锁会改写文件夹里的全部文件，重要数据请先备份。")
 
     def initializePage(self) -> None:  # noqa: N802
