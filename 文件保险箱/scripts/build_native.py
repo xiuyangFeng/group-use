@@ -22,6 +22,10 @@ NATIVE = PROJECT / "native"
 BUILD = NATIVE / "build"
 OUT = PROJECT / "core" / "_native"
 
+sys.path.insert(0, str(PROJECT))
+
+from core.console import setup_utf8_stdio  # noqa: E402
+
 
 def log(msg: str) -> None:
     print(f"[C++ 引擎] {msg}", flush=True)
@@ -53,6 +57,7 @@ def bench_binary() -> Path | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    setup_utf8_stdio()
     ap = argparse.ArgumentParser()
     ap.add_argument("--clean", action="store_true")
     args = ap.parse_args(argv)
@@ -80,7 +85,6 @@ def main(argv: list[str] | None = None) -> int:
         run([str(bench), "64"])
 
     # 用 Python 端的加载逻辑再确认一次（ABI、结构体大小、自检）
-    sys.path.insert(0, str(PROJECT))
     from core import native
 
     info = native.info()
