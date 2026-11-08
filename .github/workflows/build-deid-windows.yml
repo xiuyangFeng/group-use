@@ -34,7 +34,7 @@ jobs:
           PYTHONIOENCODING: utf-8
           PYTHONUTF8: "1"
         run: python -m pytest -q tests
-      - run: pyinstaller --noconfirm --clean --onefile --windowed --name CT_Deid app.py
+      - run: pyinstaller --noconfirm --clean --onefile --windowed --name CT_Deid --icon deid/icons/app.ico --add-data "deid/icons;deid/icons" app.py
 
       # 用打包好的 exe（而不是源码）跑一遍完整脱敏，确认多进程、写映射表在打包后都正常
       - name: Smoke test exe

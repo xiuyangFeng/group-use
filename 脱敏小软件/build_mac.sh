@@ -17,6 +17,7 @@ VENV=".venv-build-$ARCH"
 uv pip install -q -p "$VENV/bin/python" -r requirements.txt pyinstaller
 "${RUN[@]}" "$VENV/bin/python" -m PyInstaller --noconfirm --clean --windowed --name CT_Deid \
   --osx-bundle-identifier edu.lab.ctdeid \
+  --icon "$PWD/deid/icons/app.icns" --add-data "$PWD/deid/icons:deid/icons" \
   --distpath "build-mac/$ARCH/dist" --workpath "build-mac/$ARCH/work" --specpath "build-mac/$ARCH" app.py
 APP="build-mac/$ARCH/dist/CT_Deid.app"
 file "$APP/Contents/MacOS/CT_Deid"

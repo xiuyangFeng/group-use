@@ -46,22 +46,18 @@ def version() -> str:
     return __version__
 
 
+ICONS = PROJECT / "gui" / "icons"  # 设计稿生成的图标（scripts/make_icons.py），提交在仓库里
+
+
 def ensure_icons() -> dict[str, Path]:
-    """用程序自己的绘制代码生成图标（png / icns / ico），避免额外设计资源。"""
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtWidgets import QApplication
-
-    from gui.style import make_app_icon
-
-    app = QApplication.instance() or QApplication([])  # noqa: F841
-    icon = make_app_icon()
+    """把 gui/icons 里的图标放到 assets/（png / ico；icns 见 build_iconset）。"""
     ASSETS.mkdir(parents=True, exist_ok=True)
     out = {
         "png": ASSETS / "icon-1024.png",
         "ico": ASSETS / f"{APP_NAME}.ico",
     }
-    icon.pixmap(1024, 1024).save(str(out["png"]))
-    icon.pixmap(256, 256).save(str(out["ico"]))
+    shutil.copyfile(ICONS / "mac-1024.png", out["png"])
+    shutil.copyfile(ICONS / "app.ico", out["ico"])
     for p in out.values():
         if not p.exists() or p.stat().st_size == 0:
             raise SystemExit(f"图标生成失败：{p}")
@@ -75,36 +71,11 @@ def run(cmd: list[str], **kwargs) -> None:
 
 
 def build_iconset() -> None:
-    """macOS 多尺寸 iconset（.icns 用 iconutil 生成最稳）。"""
+    """macOS 图标：直接用 gui/icons/app.icns（由 scripts/make_icons.py 用 iconutil 合成）。"""
     if sys.platform != "darwin":
         return
-    iset = BUILD / f"{APP_NAME}.iconset"
-    shutil.rmtree(iset, ignore_errors=True)
-    iset.mkdir(parents=True)
-    from PySide6.QtWidgets import QApplication
-
-    from gui.style import make_app_icon
-
-    app = QApplication.instance() or QApplication([])  # noqa: F841
-    icon = make_app_icon()
-    for size, name in [
-        (16, "icon_16x16.png"),
-        (32, "icon_16x16@2x.png"),
-        (32, "icon_32x32.png"),
-        (64, "icon_32x32@2x.png"),
-        (128, "icon_128x128.png"),
-        (256, "icon_128x128@2x.png"),
-        (256, "icon_256x256.png"),
-        (512, "icon_256x256@2x.png"),
-        (512, "icon_512x512.png"),
-        (1024, "icon_512x512@2x.png"),
-    ]:
-        icon.pixmap(size, size).save(str(iset / name))
-    subprocess.run(
-        ["iconutil", "-c", "icns", str(iset), "-o", str(ASSETS / f"{APP_NAME}.icns")],
-        check=True,
-        cwd=str(PROJECT),
-    )
+    ASSETS.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ICONS / "app.icns", ASSETS / f"{APP_NAME}.icns")
 
 
 def build_native() -> Path:
@@ -150,6 +121,9 @@ def pyinstaller(icons: dict[str, Path], clean: bool, native_lib: Path) -> Path:
         # C++ 加解密引擎：放在包内 core/_native/，core/native.py 从 sys._MEIPASS 找
         "--add-binary",
         f"{native_lib}{os.pathsep}core/_native",
+        # 窗口 / 程序坞 / 任务栏图标（gui/style.py 的 make_app_icon 从 gui/icons 读）
+        "--add-data",
+        f"{ICONS}{os.pathsep}gui/icons",
         "run_gui.py",
     ]
     if clean:
@@ -489,10 +463,11 @@ def make_source_zip() -> Path:
     out = DIST / f"{APP_NAME}-{ver}-源码.zip"
     if out.exists():
         out.unlink()
-    skip_dirs = {".venv", ".build", "dist", "__pycache__", ".pytest_cache", ".git", ".stress", ".bench", ".idea"}
+    # native/build 是 C++ 的构建目录，core/_native 是编译好的库：都不是源码
+    skip_dirs = {".venv", ".build", "dist", "__pycache__", ".pytest_cache", ".git", ".stress", ".bench", ".idea", "build", "_native"}
     include_roots = [
         "core", "cli", "gui", "tests", "scripts", "docs", "installers", "reports",
-        "assets", ".github",
+        "assets", ".github", "native", "icons",
     ]
     include_files = [
         "README.md", "requirements.txt", "requirements-dev.txt", "pytest.ini",

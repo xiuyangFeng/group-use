@@ -5,7 +5,7 @@ python --version >nul 2>&1 || (echo [ERROR] Python not found. Install Python 3.1
 if not exist .venv-build python -m venv .venv-build || goto :err
 call .venv-build\Scripts\activate.bat
 python -m pip install -r requirements.txt pyinstaller || python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt pyinstaller || goto :err
-pyinstaller --noconfirm --onefile --windowed --name CT_Deid app.py || goto :err
+pyinstaller --noconfirm --onefile --windowed --name CT_Deid --icon deid\icons\app.ico --add-data "deid\icons;deid\icons" app.py || goto :err
 echo.
 echo Done: %~dp0dist\CT_Deid.exe
 explorer dist

@@ -411,7 +411,29 @@ def hero_header(kind: str, title: str, subtitle: str = "", *, size: int = 76) ->
     return w, t, s
 
 
+ICON_DIR = __import__("pathlib").Path(__file__).resolve().parent / "icons"
+
+
 def make_app_icon() -> QIcon:
+    """程序图标（窗口、程序坞 / 任务栏）。用 gui/icons 里的设计稿（scripts/make_icons.py 生成）；
+    找不到时退回用代码画的锁。"""
+    import sys
+
+    icon = QIcon()
+    ico = ICON_DIR / "app.ico"
+    if sys.platform == "win32" and ico.exists():
+        icon = QIcon(str(ico))
+    else:
+        for s in (16, 32, 64, 128, 256, 512, 1024):
+            p = ICON_DIR / f"mac-{s}.png"
+            if p.exists():
+                icon.addFile(str(p))
+    if not icon.isNull():
+        return icon
+    return _drawn_app_icon()
+
+
+def _drawn_app_icon() -> QIcon:
     pm = QPixmap(256, 256)
     pm.fill(Qt.transparent)
     p = QPainter(pm)

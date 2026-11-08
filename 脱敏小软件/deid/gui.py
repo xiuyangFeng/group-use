@@ -1011,5 +1011,26 @@ def run_gui():
         except Exception:
             pass
     root = tk.Tk()
+    set_app_icon(root)
     App(root)
     root.mainloop()
+
+
+ICON_DIR = Path(__file__).resolve().parent / "icons"
+
+
+def set_app_icon(root: tk.Tk) -> None:
+    """窗口 / 任务栏 / 程序坞图标（deid/icons，由文件保险箱的 scripts/make_icons.py 生成）。
+    对所有窗口生效；图标文件缺了也不影响使用。"""
+    try:
+        ico = ICON_DIR / "app.ico"
+        if sys.platform == "win32" and ico.exists():
+            root.iconbitmap(default=str(ico))
+            return
+        imgs = [tk.PhotoImage(file=str(ICON_DIR / f"mac-{s}.png")) for s in (256, 64, 32)
+                if (ICON_DIR / f"mac-{s}.png").exists()]
+        if imgs:
+            root.iconphoto(True, *imgs)
+            root._app_icons = imgs  # 留住引用，不然图片会被回收
+    except Exception:
+        pass
