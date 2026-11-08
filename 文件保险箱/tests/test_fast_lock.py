@@ -74,6 +74,30 @@ def test_unchanged_files_reuse_kept_ciphertext(unlocked):
     assert snapshot(root) == before
 
 
+def test_lock_start_does_not_touch_kept_fingerprints(unlocked):
+    """上锁一开始会撤保护（Windows 是 icacls）：不能改动保留的密文的指纹，否则全部白白重新加密。"""
+    import struct
+
+    from core import protect, transform
+
+    root, _ = unlocked
+    db = (root / C.VAULT_DIRNAME / C.MANIFEST_NAME).resolve().as_uri()
+    con = sqlite3.connect(f"{db}?mode=ro", uri=True)
+    try:
+        rows = con.execute("SELECT uuid, blob_fp FROM kept").fetchall()
+    finally:
+        con.close()
+    assert len(rows) == 6
+    protect.release(root)
+    paths = [_blob_dir(root) / (bytes(u).hex() + ".blob") for u, _ in rows]
+    names = ("size", "dev", "ino", "mtime", "ctime")
+    diffs = []
+    for p, (_, old), new in zip(paths, rows, transform.stat_many(paths)):
+        a, b = struct.unpack("<5Q", bytes(old)), struct.unpack("<5Q", new)
+        diffs += [f"{p.name}.{n}: {x} -> {y}" for n, x, y in zip(names, a, b) if x != y]
+    assert not diffs, "指纹变了：\n" + "\n".join(diffs)
+
+
 def test_edit_is_never_lost_even_with_same_size_and_restored_mtime(unlocked):
     """最危险的情况：内容改了、大小没变、修改时间还被改回原样。靠状态改变时间（ctime）识别。"""
     root, audit_dir = unlocked

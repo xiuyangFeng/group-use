@@ -130,16 +130,24 @@ def is_protected(root: str | os.PathLike) -> bool:
 
 def _win_everyone_denies(p: Path) -> list[str]:
     """icacls 输出里 Everyone 的拒绝规则（只看这个对象自己的，不含继承来的 (I)）。"""
+    return _win_everyone_denies_or_none(p) or []
+
+
+def _win_everyone_denies_or_none(p: Path) -> list[str] | None:
+    """同上；icacls 没跑成功时返回 None（不知道有没有规则）。"""
     try:
-        out = subprocess.run(
+        proc = subprocess.run(
             ["icacls", str(p)],
             capture_output=True,
             text=True,
             check=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        ).stdout
+        )
     except OSError:
-        return []
+        return None
+    if proc.returncode != 0:
+        return None
+    out = proc.stdout or ""
     rules = []
     for line in out.splitlines():
         if "(DENY)" not in line or "(I)" in line:
@@ -179,7 +187,11 @@ def _win_locked_siblings(parent: Path, exclude: Path) -> bool:
 
 
 def _release_windows(root: Path) -> None:
-    _run(["icacls", str(root), "/remove:d", WIN_EVERYONE, "/C", "/Q"])
+    # 没加过规则就别调 /remove:d：它照样会重写整棵树的继承权限，每个文件的「状态改变时间」
+    # 都会变，增量上锁就会把没改过的文件全当成改过的重新加密（文件多时也很慢）。
+    # 读不到（None）时宁可照旧撤一次。
+    if _win_everyone_denies_or_none(root) != []:
+        _run(["icacls", str(root), "/remove:d", WIN_EVERYONE, "/C", "/Q"])
     parent = root.parent
     if parent == root:
         return
