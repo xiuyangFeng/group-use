@@ -328,7 +328,7 @@ def cmd_status(args) -> int:
     print(f"状态：  {STATE_LABEL.get(st['state'], st['state'])}")
     print(f"创建：  {st['created_at']}")
     if st.get("mode") == C.MODE_FLASH:
-        print(f"类型：  闪电锁（不加密，{st['file_count']} 项）")
+        print(f"类型：  闪电锁（{st['file_count']} 项）")
     else:
         print(f"内容：  {st['file_count']} 个文件 / {fsutil.human_bytes(st['total_bytes'])}")
     if st["questions"]:

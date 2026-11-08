@@ -391,8 +391,10 @@ def main() -> int:
         pump()
         assert wiz.page_password.isComplete()
         assert "✓ 两次一致" in wiz.page_password.hint.text()
-        # 默认是闪电锁，并且明确提示「不加密」；这一轮测加密
-        assert wiz.page_password.mode() == C.MODE_FLASH and "不加密" in wiz.page_password.mode_flash.text()
+        # 默认是闪电锁（标题后面不带「不加密」，也没有悬停提示）；这一轮测加密
+        assert wiz.page_password.mode() == C.MODE_FLASH
+        assert wiz.page_password.mode_flash.text().startswith("闪电锁：") and "不加密" not in wiz.page_password.mode_flash.text()
+        assert wiz.page_password.mode_flash.toolTip() == ""
         # 密码框不能被压扁（内容多的时候 Qt 会压缩控件高度）
         assert wiz.page_password.pw1.height() >= 40 and wiz.page_password.pw2.height() >= 40, wiz.page_password.pw1.height()
         wiz.page_password.mode_encrypt.setChecked(True)
@@ -500,13 +502,13 @@ def main() -> int:
         assert time.time() - t0 < 10
         wiz._set_buttons_locked(False)
         wiz.accept()
-        # 主窗口卡片上要写明「闪电锁（不加密）」
+        # 主窗口卡片上写「闪电锁」
         s.add_vault(target)
         w = mw.MainWindow(s)
         try:
             pump()
             subs = [c._sub_text() for c in w.findChildren(mw.VaultCard)]
-            assert any("闪电锁（不加密）" in t for t in subs), subs
+            assert any("· 闪电锁 ·" in t for t in subs) and not any("不加密" in t for t in subs), subs
         finally:
             w._quitting = True
             w.close()
@@ -515,7 +517,7 @@ def main() -> int:
         v.close()
         assert snapshot(target) == before
 
-    check("新建向导：闪电锁（默认）→1 秒锁上→卡片标明不加密→解锁数据完整", _wizard_flash)
+    check("新建向导：闪电锁（默认）→1 秒锁上→卡片标明闪电锁→解锁数据完整", _wizard_flash)
 
     _say("== 后台线程 ==")
 

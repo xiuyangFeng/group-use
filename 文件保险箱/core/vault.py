@@ -568,7 +568,7 @@ class Vault:
         self._open_session()
         try:
             if h.is_flash:
-                self._record("CREATE", detail="创建闪电锁（不加密）并首次上锁")
+                self._record("CREATE", detail="创建闪电锁并首次上锁")
                 stats = self._flash_lock(progress, control, back_to=C.LOCKING)
             else:
                 self._record("CREATE", detail="创建保险箱并首次上锁")

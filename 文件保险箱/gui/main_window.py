@@ -196,7 +196,7 @@ class VaultCard(QWidget):
         files = int(info.get("file_count") or 0)
         total = int(info.get("total_bytes") or 0)
         if info.get("mode") == C.MODE_FLASH:
-            return f"{short_path(info['path'])} · 闪电锁（不加密）· {files:,} 项"
+            return f"{short_path(info['path'])} · 闪电锁 · {files:,} 项"
         return f"{short_path(info['path'])} · {files:,} 个文件 · {fsutil.human_bytes(total)}"
 
     def _tooltip(self) -> str:
